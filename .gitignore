@@ -1,0 +1,18 @@
+# 构建产物
+build/
+*.obj
+*.exe
+*.lib
+*.pdb
+*.ilk
+*.idb
+
+# DBC 生成器的临时文件
+can/*.gen.tmp.dbc
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+*.user
+Thumbs.db
+desktop.ini
