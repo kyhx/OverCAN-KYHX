@@ -28,8 +28,26 @@ extern "C" {
 #elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 #define PROTO_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 #else
+/* C99 回退路径（本项目 CMAKE_C_STANDARD=99，实际走的就是这条）。
+ *
+ * ⚠️ 这里必须是**双重宏展开**，不是一层：
+ *   单层 `typedef char x_##__LINE__[...]` —— `##` 会阻止 `__LINE__` 展开，
+ *   所有断言共用同一个 typedef 名 → GCC 报 "redefinition of typedef"，
+ *   行为上是未定义（不同编译器表现不一）。
+ *   两层（SA_CAT 先展开实参，再交给 SA_CAT_ 做 ## 拼接）才能得到
+ *   `x_113` / `x_124` 这样的唯一名字。
+ *
+ * 同样不能改用 `_Static_assert`：它在 C99 下虽被GCC/Clang 支持为扩展，
+ * 但 `-Wpedantic` 会报 "ISO C99 does not support"，而本项目把
+ * -Wpedantic/-Werror 视为必须通过的门槛。
+ *
+ * 这个问题是用 arm-none-eabi-gcc 做 Cortex-M3 交叉编译验证时暴露的：
+ * PC 侧 MSVC 走C11 分支，**永远不会触发** —— 典型的"换编译器才炸"。
+ */
+#define PROTO_STATIC_ASSERT_CAT_(a, b) a##b
+#define PROTO_STATIC_ASSERT_CAT(a, b)  PROTO_STATIC_ASSERT_CAT_(a, b)
 #define PROTO_STATIC_ASSERT(cond, msg) \
-    typedef char proto_static_assert_##__LINE__[(cond) ? 1 : -1]
+    typedef char PROTO_STATIC_ASSERT_CAT(proto_static_assert_, __LINE__)[(cond) ? 1 : -1]
 #endif
 
 /* ------------------------------------------------------------------------- */

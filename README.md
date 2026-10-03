@@ -49,10 +49,15 @@
 | 设计规格（硬件 / 引脚 / 协议 / 指标） | ✅ 已完成 |
 | 技术方案与实施路线 | ✅ 已完成 |
 | 协议规范独立成文 + DBC | ✅ 已完成（[protocol.md](docs/protocol.md) · [can_distributed.dbc](can/can_distributed.dbc)） |
-| 协议库（纯 C / 零 HAL）+ PC 单元测试 | ✅ 已完成，**6/6 测试通过**（`cmake --build build --target check`） |
-| 固件主体（ESP32 / STM32 应用） | ❌ 未开始 |
+| 协议库（纯 C / 零 HAL）+ PC 单元测试 | ✅ 已完成（`ctest`） |
+| **节点一业务逻辑（命令 / 遥测 / 事件 / 安全态）** | ✅ 已完成，**8/8 测试通过**（23 + 9 个用例） |
+| 节点一 BSP（bxCAN / ADC / TIM1 / GPIO / IWDG） | 🟡 代码完成、**交叉编译通过**，**未上板验证** |
+| 节点二固件 | ❌ 未开始 |
 | Bootloader / OTA 实现 | ❌ 未开始 |
 | 硬件台架与实测 | ❌ 未开始 |
+
+> ⚠️ **节点一无实测数据**：温标系数（`node1_config.h`）为占位值，必须实测标定；
+> PWM 频率、CAN 位定时、掉线安全态均**仅经交叉编译与逻辑单测验证，未经示波器/分析仪确认**。
 
 ---
 
@@ -71,9 +76,28 @@
 | --- | --- |
 | [can/can_distributed.dbc](can/can_distributed.dbc) | CAN 数据库（10 消息 / 55 信号，cantools 可解析），**由帧表自动生成**，与代码一致性由测试守护 |
 | [firmware/common/protocol/](firmware/common/protocol) | 协议库：纯 C99、**零 HAL 依赖**、无 malloc、无 C 位域——ESP32 与 STM32 共用同一份实现 |
-| [tests/](tests) | 4 个 PC 单元测试套件（编解码 / 幂等与重传 / CRC / DBC 漂移），零外部框架依赖 |
+| [firmware/node1/](firmware/node1) | 节点一固件：`include/`（配置 + HAL vtable + 业务接口）· `src/`（业务逻辑 + 调度，**零 HAL**）· `port/stm32f103/`（唯一接触寄存器的地方） |
+| [tests/](tests) | 6 个 PC 单元测试套件（协议编解码 / 幂等 / CRC / DBC 漂移 / **节点业务** / **调度时序**），零外部框架依赖 |
 | [tools/gen_dbc.py](tools/gen_dbc.py) · [tools/validate_dbc.py](tools/validate_dbc.py) | DBC 生成器与 cantools 解码级校验器 |
+| [tools/check_portable.sh](tools/check_portable.sh) | 可移植性检查：零 HAL 层在 Cortex-M3 与 PC 上 `-Wpedantic -Werror` 零告警 |
 | [CMakeLists.txt](CMakeLists.txt) | 构建入口：`cmake -S . -B build && cmake --build build --target check` |
+
+### 节点一的分层：为什么业务逻辑能测
+
+```
+node1_main.c ──► node1_sched.c ──► node1_app.c ──► proto_*（协议库）
+   port层          纯逻辑(RTOS无关)   纯逻辑(零HAL)      纯 C99
+                                      │
+                                      ▼
+                              node1_hal_t vtable
+                                      │
+                    ┌─────────────────┴─────────────────┐
+              node1_bsp.c (STM32)                   mock (PC 单测)
+```
+
+**协议库之上再包一层"零 HAL"是本阶段的关键决策**：它让"没有硬件台架时逻辑是否正确"
+成为可回答的问题。23 个业务用例 + 9 个调度用例覆盖幂等、越界拒收、掉线安全态、
+温标换算、时基回绕等路径 —— 全部在 PC 上跑，无需一块板子。
 
 ---
 
@@ -104,9 +128,21 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure    # 或：cmake --build build --target check
 ```
 
-6 个测试目标：`test_codec`（黄金报文字节 / 负值 / 越界拒收）、`test_seq`（幂等与重传，钉死两个历史缺陷）、
+8 个测试目标：`test_codec`（黄金报文字节 / 负值 / 越界拒收）、`test_seq`（幂等与重传，钉死两个历史缺陷）、
 `test_crc`（标准校验值 + 流式等价）、`test_dbc_drift`（DBC 与代码漂移）、
+`test_node_app`（节点一业务：命令执行 / 幂等 / 遥测 / 事件 / 掉线安全态）、
+`test_node_sched`（调度时序：周期计数 / 时基回绕 / 不补跑）、
 `dbc_generator_in_sync`、`dbc_decoder_matches_codec`（cantools 解码对拍）。
+
+**烧板前请再跑一次可移植性检查**：
+
+```bash
+bash tools/check_portable.sh     # 零 HAL 层在 Cortex-M3 + PC 上 -Werror 零告警
+```
+
+这一步不是形式主义：协议库的 `PROTO_STATIC_ASSERT` 宏就曾在 PC（MSVC/C11）下全绿，
+却因单层宏拼接在 GCC + C99 + `-Wpedantic` 下报 *redefinition of typedef* ——
+**换编译器才炸**的典型。详见 `tools/check_portable.sh` 头部说明。
 
 **改动协议的正确姿势**：只改 [proto_id.h](firmware/common/protocol/include/proto_id.h) 的帧表与 `proto_codec.h` 的字段，
 然后 `python tools/gen_dbc.py --write` 重新生成 DBC——**不要手改 DBC**，否则漂移测试会失败。

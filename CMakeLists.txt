@@ -26,6 +26,7 @@ find_package(Python3 COMPONENTS Interpreter)
 
 set(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 set(PROTO_DIR "${REPO_ROOT}/firmware/common/protocol")
+set(NODE1_DIR "${REPO_ROOT}/firmware/node1")
 
 # ---------------------------------------------------------------------------
 # 被测试对象：协议静态库
@@ -74,6 +75,46 @@ add_proto_test(test_crc)
 add_proto_test(test_dbc_drift)
 
 # ---------------------------------------------------------------------------
+# 节点一业务逻辑（node1_app）—— 同样零 HAL 依赖，故可注入 mock HAL 在 PC 上测
+#
+# 这一层是"协议库之上、寄存器之下"的决策逻辑：命令执行 / 遥测组装 /
+# 事件判定 / 掉线安全态。它能测，就能证明**没有硬件台架时逻辑也是对的**。
+# ---------------------------------------------------------------------------
+add_library(node1_app STATIC
+    "${NODE1_DIR}/src/node1_app.c"
+    "${NODE1_DIR}/src/node1_sched.c"
+)
+target_include_directories(node1_app PUBLIC
+    "${NODE1_DIR}/include"
+    "${NODE1_DIR}/src"     # node1_sched.h 与实现同目录，放在这里便于单测引用
+    "${PROTO_DIR}/include"
+)
+# 温标换算用 logf/expf，MSVC 下 logf 在 ucrt、Linux 下在 libm
+if(MSVC)
+    target_compile_definitions(node1_app PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(node1_app PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(node1_app PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(node1_app PUBLIC m)
+endif()
+
+function(add_node1_test name)
+    add_executable(${name} "tests/${name}.c")
+    target_link_libraries(${name} PRIVATE node1_app proto)
+    target_include_directories(${name} PRIVATE "${REPO_ROOT}/tests/harness")
+    if(MSVC)
+        target_compile_definitions(${name} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(${name} PRIVATE /W4 /utf-8)
+    else()
+        target_compile_options(${name} PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+add_node1_test(test_node_app)
+add_node1_test(test_node_sched)
+
+# ---------------------------------------------------------------------------
 # DBC 与代码的漂移检测 + cantools 解码级校验
 # ---------------------------------------------------------------------------
 if(Python3_Interpreter_FOUND)
@@ -87,7 +128,7 @@ endif()
 
 add_custom_target(check
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -C $<CONFIG>
-    DEPENDS test_codec test_seq test_crc test_dbc_drift
+    DEPENDS test_codec test_seq test_crc test_dbc_drift test_node_app test_node_sched
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     USES_TERMINAL
 )
