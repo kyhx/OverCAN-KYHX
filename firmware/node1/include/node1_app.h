@@ -9,7 +9,7 @@
  *         ↓ 通过
  *     node1_hal_t vtable（唯一接触硬件的地方）
  *         ↓
- *     stm32f103 port（bxCAN / ADC / TIM1 / GPIO）
+ *     stm32f103 port（bxCAN / ADC / TIM4 / USART1 / GPIO）
  *
  * **本文件不碰任何寄存器、不 include 任何 HAL 头、不用浮点以外的数学库**，
  * 因此 `tests/test_node_app.c` 能在 PC 上注入 mock HAL 跑真测试。

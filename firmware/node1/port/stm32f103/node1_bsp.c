@@ -1,15 +1,19 @@
 /**
  * @file    node1_bsp.c
- * @brief 节点一 STM32F103 BSP 实现：bxCAN / ADC / TIM1 PWM / GPIO / IWDG。
+ * @brief 节点一 STM32F103 BSP 实现：bxCAN / ADC / TIM4 PWM / GPIO / IWDG。
  *
  * 本文件是整个固件里**唯一**直接接触 STM32 外设的地方。所有寄存器操作
  * 都集中在此，业务层（node1_app.c）完全不知道硬件存在 —— 这正是业务逻辑
  * 能在 PC 上做单测的前提。
  *
  * 三个必须做对的工程细节（docs/项目文档.md §9.5，均为实测踩过的坑）：
- *   1. **TIM1 必须显式使能 MOE**（TIM_CtrlPWMOutputs）。PA8/PA9 用的是高级
- *      控制定时器，输出默认关闭 —— 不调用这行函数 PWM 完全没有波形，
- *      而代码"看起来完全正常"。这是初学者最常见的 CAN/电机调试困境。
+ *   1. **PWM 放在通用定时器 TIM4（PB6/PB7），不放 TIM1**。原方案用 TIM1 的
+ *      PA8/PA9，有两个代价：① PA9 兼作 USART1_TX，占用后节点一失去唯一调试
+ *      串口；② TIM1 是高级控制定时器，输出默认关闭，**必须显式调用
+ *      `HAL_TIM_CtrlPWMOutputs(TIM1, ENABLE)` 使能 MOE**，漏掉这行的现象极具
+ *      迷惑性：寄存器配置全对、定时器在跑、引脚上却没有波形。
+ *      改到 TIM4 后这两个问题一起消失（通用定时器无 MOE 概念）。
+ *      依据：docs/引脚分配.md §3.2 方案 A。
  *   2. **bxCAN 的 BS1 只有 4 bit**（TS1[19:16]），最大 16 tq。
  *      网上常见的"24 tq @ 500kbps"方案在 F103 上根本编译不出来/跑不起来。
  *      本项目用 8 tq：P=9 BS1=6 BS2=1 SJW=1 → 采样点 87.5%。
@@ -17,12 +21,16 @@
  *
  * 硬件前提（务必按 node1_config.h 接线）：
  *   - 热敏 AO → PA0 (ADC1_IN0)，DO → PA1
- *   - TB6612: PWMA=PA8(TIM1_CH1) PWMB=PA9(TIM1_CH2) A组 IN1=PB0 IN2=PB1
+ *   - TB6612: PWMA=PB6(TIM4_CH1) PWMB=PB7(TIM4_CH2) A组 IN1=PB0 IN2=PB1
  *             B组 IN1=PB10 IN2=PB11 STBY=PB12
  *   - 蜂鸣器 PB13（**低电平有效**）
+ *   - 调试串口 USART1: TX=PA9 RX=PA10（PWM 移走后已释放）
  *   - CAN1: TX=PA12 RX=PA11，**两端必须各接 120Ω 终端电阻**
+ *   - SWD: PA13/PA14 **必须保留**
  */
 #include "node1_bsp.h"
+
+#include <string.h>
 
 #include "stm32f1xx_hal.h"
 
@@ -32,25 +40,64 @@
 /* 时钟与串口调试（可选，编译期开关）                                          */
 /* ========================================================================== */
 
-/** 置 0 则完全不初始化 USART2 —— 节点一没有 USART1（PA9 被 PWM 占用），
- *  实际调试推荐用 SEGGER RTT（走 SWD，不占引脚）。 */
-#define NODE1_UART_LOG_ENABLE  0
+/** 调试输出开关：1 = 初始化 USART1（PA9/PA10，115200）。
+ *  PWM 移到 TIM4 后 PA9 已释放，因此这里可以默认开启串口调试。
+ *  注意：**必须在 gpio_init 之前调用 MX_USART1_UART_Init**（HAL 要求外设
+ *  的 GPIO 由 HAL_UART_MspInit 配置），本文件在 bsp_init 里按序调用。 */
+#define NODE1_UART_LOG_ENABLE  1
 
 #if NODE1_UART_LOG_ENABLE
-static UART_HandleTypeDef huart2;
-#endif
+static UART_HandleTypeDef huart1;
 
-/** RTT 缓冲。放 .bss 而非栈：中断与任务都可能写，且避免占栈。 */
-#if defined(SEGGER_RTT_MODE) || 1
-static char g_rtt_buf[256];
-static SEGGER_RTT_PRINTF g_rtt_printf;
-#endif
-
-/** 极简整数打印。**中断与栈保护场景禁用浮点**（libm 会拖入几 KB 代码，
- *  且 F103 只有 20KB SRAM）。 */
-static void bsp_log(const char *fmt, ...)
+/** USART1 初始化（PA9=TX / PA10=RX，115200-8-N-1）。
+ *  PWM 移到 TIM4 后 PA9/PA10 已释放，节点一重新有了标准调试串口。
+ *  注意：不要在中断里调用；且**不用 printf/浮点**（libm 会拖入数 KB，
+ *  F103 只有 20KB SRAM）。 */
+static void uart_log_init(void)
 {
-    (void)fmt; /* 占位：RTT 实现在下方按需启用 */
+    GPIO_InitTypeDef g = {0};
+
+    __HAL_RCC_USART1_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    /* PA9 = USART1_TX，复用推挽 */
+    g.Pin = GPIO_PIN_9;
+    g.Mode = GPIO_MODE_AF_PP;
+    g.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOA, &g);
+    /* PA10 = USART1_RX，浮空输入（外部模块驱动） */
+    g.Pin = GPIO_PIN_10;
+    g.Mode = GPIO_MODE_INPUT;
+    g.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &g);
+
+    huart1.Instance = USART1;
+    huart1.Init.BaudRate = 115200u;
+    huart1.Init.WordLength = UART_WORDLENGTH_8B;
+    huart1.Init.StopBits = UART_STOPBITS_1;
+    huart1.Init.Parity = UART_PARITY_NONE;
+    huart1.Init.Mode = UART_MODE_TX_RX;
+    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart1) != HAL_OK) {
+        /* 串口起不来不应阻塞上线：CAN 才是主通道，调试口只是辅助 */
+    }
+}
+#endif
+
+/** 极简日志：优先走 USART1（若启用），否则静默。
+ *  禁止在中断与栈保护路径里调用。 */
+static void bsp_log(const char *msg)
+{
+#if NODE1_UART_LOG_ENABLE
+    if (msg != NULL) {
+        /* 用阻塞发送（超时 10ms）而不是中断/DMA：调试日志不该引入并发问题 */
+        (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg,
+                                (uint16_t)strlen(msg), 10u);
+    }
+#else
+    (void)msg;
+#endif
 }
 
 /* ========================================================================== */
@@ -64,12 +111,12 @@ static void gpio_init(void)
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
 
-    /* --- PA8/PA9：TIM1 复用推挽输出 --------------------------------- */
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_8 | GPIO_PIN_9);
+    /* --- PB6/PB7：TIM4_CH1/CH2 复用推挽输出（电机 PWM）-------------- */
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_6 | GPIO_PIN_7);
     g.Mode = GPIO_MODE_AF_PP;
     g.Speed = GPIO_SPEED_FREQ_HIGH;   /* 20kHz PWM 需要较高的输出翻转速度 */
-    g.Pin = GPIO_PIN_8 | GPIO_PIN_9;
-    HAL_GPIO_Init(GPIOA, &g);
+    g.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    HAL_GPIO_Init(GPIOB, &g);
 
     /* --- 方向控制脚：PB0 PB1 PB10 PB11 推挽输出 ---------------------- */
     HAL_GPIO_DeInit(GPIOB, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_10 | GPIO_PIN_11);
@@ -142,47 +189,56 @@ static void adc_init(void)
 }
 
 /* ========================================================================== */
-/* TIM1 → PWM（20kHz）                                                         */
+/* TIM4 → PWM（20kHz，PB6/PB7）                                                */
 /* ========================================================================== */
 
-static TIM_HandleTypeDef htim1;
+/** 电机 PWM 定时器句柄。用 TIM4（通用定时器）而非 TIM1：
+ *  ① 无需 MOE 使能；② 不占用 PA9/PA10 的 USART1 调试口。 */
+static TIM_HandleTypeDef htim_motor;
 
 static void pwm_init(void)
 {
     TIM_OC_InitTypeDef oc = {0};
+    GPIO_InitTypeDef g = {0};
 
-    __HAL_RCC_TIM1_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE(); /* PA8/PA9 已在 gpio_init 配为复用推挽 */
+    __HAL_RCC_TIM4_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
 
-    htim1.Instance = TIM1;
-    htim1.Init.Prescaler = NODE1_MOTOR_PWM_PSC;
-    htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim1.Init.Period = NODE1_MOTOR_PWM_ARR;  /* 72MHz/1/3600 = 20kHz */
-    htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-    if (HAL_TIM_PWM_Init(&htim1) != HAL_OK) {
-        bsp_log("tim1 init failed\r\n");
+    /* PB6/PB7 必须在**本函数内**再配一次为复用推挽：
+     * 虽然 gpio_init 已配过，但 gpio_init 末尾对方向脚/STBY/蜂鸣器的写操作
+     * 以及后续可能的重配置都可能影响，PWM 引脚的正确性直接决定电机能否转动，
+     * 这里做一次幂等的显式配置，避免"顺序改动导致没波形"。 */
+    g.Mode = GPIO_MODE_AF_PP;
+    g.Speed = GPIO_SPEED_FREQ_HIGH;
+    g.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    HAL_GPIO_Init(GPIOB, &g);
+
+    htim_motor.Instance = TIM4;
+    htim_motor.Init.Prescaler = NODE1_MOTOR_PWM_PSC;
+    htim_motor.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim_motor.Init.Period = NODE1_MOTOR_PWM_ARR;  /* 72MHz/1/3600 = 20kHz */
+    htim_motor.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim_motor.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    if (HAL_TIM_PWM_Init(&htim_motor) != HAL_OK) {
+        bsp_log("tim4 pwm init failed\r\n");
     }
 
     oc.OCMode = TIM_OCMODE_PWM1;
     oc.Pulse = 0; /* ⚠️ 必须为 0：非 0 会让电机一上电就转 */
     oc.OCPolarity = TIM_OCPOLARITY_HIGH;
     oc.OCFastMode = TIM_OCFAST_DISABLE;
-    oc.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-    oc.OCIdleState = TIM_OCIDLESTATE_RESET;
-    oc.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+    /* 注：TIM4 是通用定时器，没有互补输出与 MOE，故不再设置
+     *     OCIdleState / OCNIdleState 等高级定时器专用字段。 */
 
-    (void)HAL_TIM_PWM_ConfigChannel(&htim1, &oc, TIM_CHANNEL_1); /* PA8 */
-    (void)HAL_TIM_PWM_ConfigChannel(&htim1, &oc, TIM_CHANNEL_2); /* PA9 */
+    (void)HAL_TIM_PWM_ConfigChannel(&htim_motor, &oc, TIM_CHANNEL_1); /* PB6 */
+    (void)HAL_TIM_PWM_ConfigChannel(&htim_motor, &oc, TIM_CHANNEL_2); /* PB7 */
 
-    (void)HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-    (void)HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+    (void)HAL_TIM_PWM_Start(&htim_motor, TIM_CHANNEL_1);
+    (void)HAL_TIM_PWM_Start(&htim_motor, TIM_CHANNEL_2);
 
-    /* ⚠️⚠️ 关键一行：不调用它，PWM 完全没有输出。
-     * TIM1 是高级控制定时器（Advanced-control timer），主输出使能位 MOE
-     * 默认为 0，必须显式打开。漏掉这行的现象非常迷惑：寄存器配置全对、
-     * 定时器在跑、但引脚上测不到波形。 */
-    HAL_TIM_CtrlPWMOutputs(&htim1, ENABLE);
+    /* 说明：这里**刻意不需要** HAL_TIM_CtrlPWMOutputs —— MOE 是 TIM1/TIM8
+     * 等高级控制定时器才有的主输出使能位，通用定时器 TIM4 无此概念。
+     * 若将来把 PWM 换回 TIM1，必须补上这一行，否则没有波形。 */
 }
 
 /* ========================================================================== */
@@ -360,11 +416,11 @@ static void bsp_motor_set(node1_motor_id_t id, node1_motor_action_t action,
     if (id == NODE1_MOTOR_A) {
         port_in1 = GPIOB; pin_in1 = (uint16_t)(1u << NODE1_MOTOR_A_IN1_PIN);
         port_in2 = GPIOB; pin_in2 = (uint16_t)(1u << NODE1_MOTOR_A_IN2_PIN);
-        channel = TIM_CHANNEL_1;
+        channel = TIM_CHANNEL_1; /* PB6 */
     } else {
         port_in1 = GPIOB; pin_in1 = (uint16_t)(1u << NODE1_MOTOR_B_IN1_PIN);
         port_in2 = GPIOB; pin_in2 = (uint16_t)(1u << NODE1_MOTOR_B_IN2_PIN);
-        channel = TIM_CHANNEL_2;
+        channel = TIM_CHANNEL_2; /* PB7 */
     }
 
     switch (action) {
@@ -390,8 +446,8 @@ static void bsp_motor_set(node1_motor_id_t id, node1_motor_action_t action,
     if (duty_pct > 100u) {
         duty_pct = 100u;
     }
-    const uint32_t ccr = ((uint32_t)duty_pct * (htim1.Init.Period + 1u)) / 100u;
-    (void)HAL_TIM_SetCompare(&htim1, channel, ccr);
+    const uint32_t ccr = ((uint32_t)duty_pct * (htim_motor.Init.Period + 1u)) / 100u;
+    (void)HAL_TIM_SetCompare(&htim_motor, channel, ccr);
 
     HAL_GPIO_WritePin(port_in1, pin_in1, in1);
     HAL_GPIO_WritePin(port_in2, pin_in2, in2);
@@ -498,6 +554,9 @@ void node1_bsp_init(const node1_hal_t **out_hal)
     HAL_SYSTICK_Config(SystemCoreClock / 1000u);
 
     gpio_init();
+#if NODE1_UART_LOG_ENABLE
+    uart_log_init(); /* 放在 gpio_init 之后：两者都操作 GPIOA，顺序明确可读 */
+#endif
     adc_init();
     pwm_init();
     can_init();

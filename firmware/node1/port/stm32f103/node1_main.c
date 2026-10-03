@@ -14,8 +14,9 @@
  * "各任务体"，其余代码不动 —— 这就是当初把它单独抽出来的收益。
  *
  * 接线提醒（详见 node1_bsp.c 头注释）：
- *   热敏 AO→PA0 / DO→PA1；TB6612 PWMA=PA8 PWMB=PA9 IN1/2=PB0,PB1,PB10,PB11
+ *   热敏 AO→PA0 / DO→PA1；TB6612 PWMA=PB6 PWMB=PB7 IN1/2=PB0,PB1,PB10,PB11
  *   STBY=PB12；蜂鸣器 PB13（低电平有效）；CAN1 TX=PA12 RX=PA11
+ *   调试串口 USART1 TX=PA9 RX=PA10（115200）
  *   **PA13/PA14 是 SWD，绝不可占用** —— 它们是唯一的烧写与调试通道。
  */
 #include "node1_app.h"

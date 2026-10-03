@@ -19,7 +19,7 @@ extern "C" {
 #endif
 
 /**
- * 初始化全部外设：GPIO / ADC / TIM1 PWM / bxCAN / IWDG。
+ * 初始化全部外设：GPIO / ADC / TIM4 PWM / USART1 / bxCAN / IWDG。
  *
  * 顺序有讲究：
  *   1. 先 HAL_Init + 时钟（72MHz）—— 其余外设的时钟源依赖它

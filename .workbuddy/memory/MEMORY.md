@@ -7,7 +7,9 @@
 
 CAN 总线异构多控制器系统：ESP32-S3 核心机 + 2×STM32F103C8T6 节点，**求职作品集**用途，目标岗位嵌入式软件 / 车载·工业 CAN / IoT。
 
-**实况**：已有协议库 + DBC + PC 单测（6/6 绿，已提交）。**仍无**：固件主体、Bootloader/OTA、硬件台架、实测数据、原理图。所有指标证据等级仅"分析级"。
+**实况**：已有协议库 + DBC + PC 单测（6/6 绿，已提交）+ 节点一固件骨架。**仍无**：Bootloader/OTA、其余固件主体、硬件台架、实测数据、原理图。所有指标证据等级仅"分析级"。
+
+**推送阻塞（2026-10-03 未解决，处置办法记此）**：`origin` = `https://github.com/kyhx/OverCAN-KYHX.git`（远程仍为空仓库），本地提交齐全（`ea35135` 基线、`e60b9db` 节点一骨架）。**`git push` 被网络层重置**：HTTPS 读操作（`ls-remote`）可用但 push 的 POST 被拦——换可达 IP（140.82.112/113/114.3、20.27.177.113，TCP 均通）、`http.curloptResolve` 钉 IP、`http.version HTTP/1.1`、查本地代理**全部无效**。**唯一可行 = SSH**：`ssh.github.com:443` 与 `github.com:22` 均可达，`ssh -T -p 443 git@ssh.github.com` 返回 `Permission denied (publickey)`（服务器正常，仅缺密钥；`~/.ssh` 不存在）。恢复办法：① 生成 ed25519 → 公钥加 GitHub → `git remote set-url origin git@ssh.github.com:kyhx/OverCAN-KYHX.git` + `git config core.sshCommand "ssh -p 443"` → push；② 挂代理后 `git config http.proxy <代理>`；③ 换网络直接 `git push -u origin main`。
 
 ## 工程机制（勿破坏）
 
@@ -24,6 +26,21 @@ CAN 总线异构多控制器系统：ESP32-S3 核心机 + 2×STM32F103C8T6 节�
 - ⚠️ **写时序测试必须保证时间单向推进**（两次 `run_until(0→A)` + `run_until(0→B)` 会让 B 段跑两遍）；**越界帧不能靠编码器构造**（编码器先拒），须手搓字节。
 - cantools：有 `VAL_` 表的信号 `decode()` 返枚举名字符串；factor≠1 的 float 信号在 `scaling=False` 下返原始整数；位域信号别建逐位 VAL_ 表。
 - ⚠️ 判断"文件是否存在"要用 `Test-Path` / `ls -a`，**不能靠 glob 结果做否定结论**（glob 不返回隐藏目录，差点误判"无 git 仓库"）。
+
+## 引脚分配（2026-10-03 定稿并已核对官方文档）
+
+- **落地手册 = `docs/引脚分配.md`**（三块板全量分配 + 未分配引脚清单 + 风险表 R-1~R-11 + 上电前核对清单 + §9 已核实事实含引用）。配置头：`firmware/node1/include/node1_config.h`、`firmware/node2/include/node2_config.h`。**引脚变更必须三处同步（本手册 / 项目文档 §4 / 配置头）**。
+- ⭐ **节点一电机 PWM 已从 TIM1 的 PA8/PA9 改为 TIM4 的 PB6/PB7**（`node1_config.h` + `node1_bsp.c` 已改）。理由：① PA9 兼作 USART1_TX，占用后节点一失去唯一调试串口；② TIM1 是高级定时器，**不调 `HAL_TIM_CtrlPWMOutputs` 就没有波形**。改后 **PA9/PA10 作 USART1 调试口**（115200），且 BSP 里已加真实 `uart_log_init()`（NODE1_UART_LOG_ENABLE=1）。**切勿改回 TIM1**，除非同时补上 MOE 那一行。
+- **节点二调试从设计上就是 SEGGER RTT**：PA2/PA3 被红外 ADC/DO 占用，**腾不出任何 UART**（与节点一不同，节点一能靠挪 PWM 腾出）。舵机在 TIM3_CH1/PA6。
+- ⭐ **已核实的硬事实（勿凭印象推翻，依据见 `docs/引脚分配.md` §9）**：
+  - ESP32-S3 的 **strapping 引脚只有 GPIO0 / GPIO3 / GPIO45 / GPIO46**；**GPIO8、GPIO9 不是**（早期误判过，易与 ESP32-C3 混淆）。GPIO46 兼启动模式与 ROM 日志、GPIO45 定 VDD_SPI 电压、GPIO3 仅在烧 `STRAP_JTAG_SEL` eFuse 后才作 JTAG 源选择。
+  - **GPIO47/48 只有型号带 "V"（N16R16V）才是 1.8V 域**；本项目 **N16R8 是 3.3V 域**。GPIO47 非 strapping、无上电毛刺，但**复位后是输入使能无上下拉（悬空）→ 按键必须使能内部上拉**。
+  - **STM32F103C8T6 的 CAN1 在 LQFP48 上只有两组**：PA11/PA12（默认）或 **PB8/PB9**（`CAN_REMAP=10`）；**PD0/PD1 在 48 脚封装不存在**，RM0008 明文禁止 36/48/64 脚封装做 Port D 的 CAN 重映射。
+  - **PA15/PB3/PB4 释放为 GPIO**：开 AFIO 时钟 → `AFIO_MAPR` 的 `SWJ_CFG=010`（关 JTAG-DP 留 SW-DP）→ 再配 GPIO，**SWD 仍可用**；`SWJ_CFG` 是**只写位，禁止读-改-写**。
+  - **PA0~PA7/PB0/PB1 这 10 个 ADC 脚不是 5V 容忍**（DS5319 中未标 FT）= Standard I/O，上限 VDD+0.3V/绝对最大 4.0V，**模拟与数字模式同属引脚级限制**。LQFP48 恰好只有 ADC1_IN0~IN9。
+  - LQFP48 GPIO 总数 = PA0~15 + PB0~15 + PC13~15 = **35**（PC13/14/15 灌电流很弱）。
+- **`tools/check_portable.sh` 已扩展**：新增"板级配置头自洽性"检查（用一个临时 TU 同时 include node1/node2 配置头，强制触发里面的 `#error`）——因为**没人包含的头文件里的 `#error` 等于没写**。已验证该检查能真的抓到越界（把舵机角度改成 200 会 FAIL）。跑法：`& 'F:\Program Files\Git\bin\bash.exe' tools/check_portable.sh`（bash 不在 PATH）。
+- **厂商 PDF 不入库**：`docs/*.pdf`、`docs/*.txt`（rm0008 12.5MB、ds5319 1.9MB）已加进 `.gitignore`。
 
 ## 已定决策（勿凭记忆推翻）
 

@@ -10,6 +10,12 @@ build/
 # DBC 生成器的临时文件
 can/*.gen.tmp.dbc
 
+# 厂商数据手册与参考资料：体积大且有版权，只本地留存不入库
+#   例：docs/rm0008.pdf（STM32F1 参考手册 12.5MB）、docs/ds5319.pdf（ESP32-S3 数据手册）
+#   提取出的文本同理（docs/*.txt），需要时用 docs/extract.py 本地重新生成
+docs/*.pdf
+docs/*.txt
+
 # 编辑器 / 系统
 .vs/
 .vscode/

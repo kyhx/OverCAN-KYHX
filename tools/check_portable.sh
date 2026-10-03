@@ -85,6 +85,38 @@ if [ -n "$ARM_GCC" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 1.5 板级配置头（引脚分配）自洽性
+# ---------------------------------------------------------------------------
+# 为什么单独查：#error 只有在头文件被包含时才会触发。板级配置里的
+#   - 任务栈预算超限（20KB SRAM 是硬约束）
+#   - 舵机角度超出协议允许范围
+# 这类编译期断言若没人包含该头文件，就**永远不会生效** —— 等于没写。
+# 这里用一个一次性 TU 把两个节点的配置头都包含进来，强制触发它们的 #error。
+CONFIG_INCLUDES="-I${PROTO_INC} -I${NODE1_INC} -Ifirmware/node2/include"
+CONFIG_TU="$(mktemp --suffix=.c)"
+trap 'rm -f "$CONFIG_TU"' EXIT
+cat > "$CONFIG_TU" <<'EOF'
+/* 仅用于触发板级配置头的编译期校验（#error 与宏算术） */
+#include "node1_config.h"
+#include "node2_config.h"
+int main(void) { return 0; }
+EOF
+
+if [ -n "$ARM_GCC" ]; then
+  echo "== 板级配置头自洽性（Cortex-M3）=="
+  out=$("$ARM_GCC" -mcpu=cortex-m3 -mthumb -std=c99 -Wall -Wextra -Wpedantic \
+        -Werror -Os $CONFIG_INCLUDES -c "$CONFIG_TU" -o /dev/null 2>&1)
+  if [ -z "$out" ]; then
+    printf "  [ ok ] node1_config.h + node2_config.h\n"
+  else
+    printf "  [FAIL] 板级配置头\n"
+    echo "$out" | head -10 | sed 's/^/         /'
+    fail=1
+  fi
+  echo
+fi
+
+# ---------------------------------------------------------------------------
 # 2. PC 原生（宿主编译器，若有 gcc/clang 也查一遍告警集合）
 # ---------------------------------------------------------------------------
 HOST_CC="${HOST_CC:-}"

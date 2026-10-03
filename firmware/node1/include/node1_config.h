@@ -49,11 +49,21 @@
 #define NODE1_THERM_DO_PIN        1u   /**< PA1，热敏模块数字量输出 */
 
 /* --- TB6612FNG 电机驱动（双通道）------------------------------------------ */
-/* PWMA = PA8 = TIM1_CH1；PWMB = PA9 = TIM1_CH2。
- * ⚠️ PA9 = USART1_TX，占用后**失去标准调试串口** → 调试走 SEGGER RTT。 */
-#define NODE1_MOTOR_PWM_TIM          1u
-#define NODE1_MOTOR_A_PWM_CH         1u  /**< TIM1_CH1 = PA8 */
-#define NODE1_MOTOR_B_PWM_CH         2u  /**< TIM1_CH2 = PA9 */
+/* PWMA = PB6 = TIM4_CH1；PWMB = PB7 = TIM4_CH2。
+ *
+ * ⚠️ 为什么不用文档里的 PA8/PA9（TIM1_CH1/CH2）——这两条都是实际踩过的坑：
+ *   ① PA9 = USART1_TX：占用后节点一**失去唯一的调试串口**，阶段 1"单节点打通"
+ *      的调试成本陡增；
+ *   ② TIM1 是**高级控制定时器**，输出默认关闭，必须额外调用
+ *      `TIM_CtrlPWMOutputs(TIM1, ENABLE)` 使能 MOE，漏掉就是"配置全对但没有
+ *      波形"的经典哑火。
+ *   改到 TIM4 后：PA9/PA10 留作 USART1 调试口，且通用定时器无 MOE 概念。
+ *   代价：PWM 通道从 TIM1 换到 TIM4，仅改本文件的几个宏。
+ *
+ * 依据：docs/引脚分配.md §3.2 方案 A、docs/项目文档.md §4.2 的"建议"行。 */
+#define NODE1_MOTOR_PWM_TIM          4u  /**< TIM4（通用定时器，无 MOE 坑） */
+#define NODE1_MOTOR_A_PWM_CH         1u  /**< TIM4_CH1 = PB6 */
+#define NODE1_MOTOR_B_PWM_CH         2u  /**< TIM4_CH2 = PB7 */
 /** PWM 频率 20 kHz：高于人耳听觉上限，电机啸叫不可闻。
  *  72MHz / (PSC+1) / (ARR+1) = 20kHz → PSC=0, ARR=3599。 */
 #define NODE1_MOTOR_PWM_FREQ_HZ      20000u
