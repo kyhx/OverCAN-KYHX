@@ -172,15 +172,21 @@ static void adc_init(void)
     hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
     hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
     hadc1.Init.NbrOfConversion = 1;
+    hadc1.Init.DiscontinuousConvMode = DISABLE;
+    hadc1.Init.NbrOfDiscConversion = 0;
 
-    /* ADC 预分频：72MHz / 6 = 12MHz（ADC 最高 14MHz）
-     * 采样时间取 239.5 周期 → 单次转换约 20μs，对应 12 位精度所需的高源阻抗。 */
-    hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-    (void)HAL_ADCEx_Calibration_Start(&hadc1); /* 必须在使能前校准 */
-
+    /* ⚠️ 校准的使能/关闭**由 HAL 自己完成**，不要再手写 HAL_ADC_Enable/Disable：
+     * F1 的 HAL 里根本没有这两个函数（它们是 F3/F4 才有的 API），写了只会得到
+     * "implicit declaration" 警告 + 链接错误。F1 的
+     * HAL_ADCEx_Calibration_Start() 内部顺序是：
+     *     ADC_ConversionStop_Disable() → ADC_Enable() → 启动校准 → 关 ADC
+     * 也就是说调用它本身就把"必须先在开启状态才能校准"这件事满足了。
+     * 初版把它放在 HAL_ADC_Init 之前（ADC 尚未配置）属于静默失效：
+     * 编译能过，但校准没有真正生效、精度不达标。 */
     if (HAL_ADC_Init(&hadc1) != HAL_OK) {
         bsp_log("adc init failed\r\n");
     }
+    (void)HAL_ADCEx_Calibration_Start(&hadc1);
 
     ch.Channel = NODE1_THERM_ADC_CHANNEL;
     ch.Rank = ADC_REGULAR_RANK_1;
@@ -254,11 +260,25 @@ static volatile uint8_t  g_can_rx_head = 0;  /* 中断写 */
 static volatile uint8_t  g_can_rx_tail = 0;  /* 任务读 */
 static volatile bool     g_can_rx_overflow = false; /* 溢出统计（丢帧证据） */
 
-static CAN_HandleTypeDef hcan1;
+/** bxCAN 句柄。**必须是非 static**：Core/Src/stm32f1xx_it.c 里的
+ *  USB_LP_CAN1_RX0_IRQHandler 需要把 &hcan1 交给 HAL_CAN_IRQHandler，
+ *  而那个中断函数在另一个编译单元里。 */
+CAN_HandleTypeDef hcan1;
 
 /** 1ms 时间基准：CAN 位定时需要精确的 APB1 频��，SysTick 兼作毫秒计数。 */
 static volatile uint32_t g_millis = 0;
-void SysTick_Handler(void) { g_millis++; }
+
+/** SysTick 中断里由 Core/Src/stm32f1xx_it.c 调用，推进毫秒时基。
+ *
+ * ⚠️ 这里**刻意不定义 SysTick_Handler**：向量表里的那个必须唯一，而 CubeMX
+ * 生成的 Core/Src/stm32f1xx_it.c 已经定义了一个（并调用 HAL_IncTick）。
+ * 两边同时定义会在链接期报 multiple definition，或更糟——取决于链接顺序，
+ * HAL_IncTick 不再被调用，于是 HAL_Delay/HAL_GetTick 静默失效。
+ * 正确做法：在 it.c 的 `USER CODE BEGIN SysTick_IRQn 1` 段里调用本函数。 */
+void node1_bsp_tick_ms(void)
+{
+    g_millis++;
+}
 
 static void can_filters_init(void)
 {
@@ -343,7 +363,24 @@ static void can_init(void)
     can_filters_init();
 }
 
-/** CAN RX 中断（USB_LP_CAN1_RX0_IRQHandler 由 stm32f1xx_it.c 转发到此）。 */
+/** 从 CAN 硬件搬一帧进队列（中断上下文调用）。定义在本文件下方。 */
+void node1_can_rx_isr_handler(void);
+
+/** CAN RX 帧已到达 FIFO0 的 HAL 回调。
+ *
+ * 调用链（三步缺一不可，且中间断了不会报错）：
+ *     USB_LP_CAN1_RX0_IRQHandler()            ← Core/Src/stm32f1xx_it.c（手工补，启动文件里是 weak 空实现）
+ *         └─ HAL_CAN_IRQHandler(&hcan1)        ← HAL 清标志 + 派发
+ *               └─ HAL_CAN_RxFifo0MsgPendingCallback()  ← 本函数
+ * 由 can_init() 里的 HAL_CAN_ActivateNotification(CAN_IT_RX_FIFO0_MSG_PENDING) 使能。 */
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+    if (hcan == NULL || hcan->Instance != CAN1) {
+        return;
+    }
+    node1_can_rx_isr_handler();
+}
+
 void node1_can_rx_isr_handler(void)
 {
     CAN_RxHeaderTypeDef hdr;
@@ -447,7 +484,9 @@ static void bsp_motor_set(node1_motor_id_t id, node1_motor_action_t action,
         duty_pct = 100u;
     }
     const uint32_t ccr = ((uint32_t)duty_pct * (htim_motor.Init.Period + 1u)) / 100u;
-    (void)HAL_TIM_SetCompare(&htim_motor, channel, ccr);
+    /* 用 __HAL_TIM_SET_COMPARE 宏而不是 HAL_TIM_SetCompare 函数：
+     * 后者在 F1 的 HAL 里不存在（是 F0/F3/F4 的 API），写了会链接失败。 */
+    __HAL_TIM_SET_COMPARE(&htim_motor, channel, ccr);
 
     HAL_GPIO_WritePin(port_in1, pin_in1, in1);
     HAL_GPIO_WritePin(port_in2, pin_in2, in2);
@@ -527,11 +566,21 @@ static const node1_hal_t g_hal = {
 /* 对外接口                                                                    */
 /* ========================================================================== */
 
-void node1_bsp_init(const node1_hal_t **out_hal)
+void node1_bsp_init_system(void)
 {
+    /* 时钟与 HAL 由 CubeMX 的 main() 负责，这里只做"如果没人配，我们就配"的兜底，
+     * 让本文件在两种工程形态下都能工作：
+     *   ① CAN_Node1（CubeMX 工程）：main.c 已调 HAL_Init + SystemClock_Config
+     *      → SystemCoreClock 已是 72MHz → 这里直接返回，绝不重复配置；
+     *   ② 独立裸机入口（不经 CubeMX main）：此时 SystemCoreClock 还是复位默认的
+     *      8MHz（HSI），于是这里完成 72MHz 初始化。
+     * 判据用 SystemCoreClock 实测值而不是"谁调用了我"，避免两处都以为自己该配。 */
+    if (SystemCoreClock >= 72000000u) {
+        return;
+    }
+
     HAL_Init();
 
-    /* 72MHz：HSE 8MHz × PLL(×9)。CAN 依赖 APB1=36MHz，ADC 依赖 72MHz。 */
     RCC_OscInitTypeDef osc = {0};
     RCC_ClkInitTypeDef clk = {0};
     osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
@@ -547,10 +596,17 @@ void node1_bsp_init(const node1_hal_t **out_hal)
     clk.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
     clk.AHBCLKDivider = RCC_SYSCLK_DIV1;   /* HCLK  = 72MHz */
     clk.APB1CLKDivider = RCC_HCLK_DIV2;    /* PCLK1 = 36MHz（CAN 上限 36MHz）*/
-    clk.APB2CLKDivider = RCC_HCLK_DIV1;    /* PCLK2 = 72MHz（ADC 上限 14MHz）*/
+    clk.APB2CLKDivider = RCC_HCLK_DIV1;    /* PCLK2 = 72MHz */
     (void)HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_2);
+}
 
-    /* 1kHz SysTick → 既作 HAL 延时基准，也作 g_millis 时基 */
+void node1_bsp_init(const node1_hal_t **out_hal)
+{
+    /* 兜底时钟（CubeMX 工程里会直接返回，见上面的注释） */
+    node1_bsp_init_system();
+
+    /* 1kHz SysTick → 既作 HAL 延时基准（HAL_IncTick），也作 g_millis 时基
+     * （由 stm32f1xx_it.c 调 node1_bsp_tick_ms）。 */
     HAL_SYSTICK_Config(SystemCoreClock / 1000u);
 
     gpio_init();

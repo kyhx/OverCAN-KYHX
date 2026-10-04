@@ -7,7 +7,28 @@
 
 CAN 总线异构多控制器系统：ESP32-S3 核心机 + 2×STM32F103C8T6 节点，**求职作品集**用途，目标岗位嵌入式软件 / 车载·工业 CAN / IoT。
 
-**实况**：已有协议库 + DBC + PC 单测（6/6 绿，已提交）+ 节点一固件骨架。**仍无**：Bootloader/OTA、其余固件主体、硬件台架、实测数据、原理图。所有指标证据等级仅"分析级"。
+**实况**：已有协议库 + DBC + PC 单测（8/8 绿）+ 节点一固件**已接入真实 MCU 工程并可交叉编译出 ELF**。**仍无**：Bootloader/OTA、节点二/ESP32 固件实现、硬件台架、实测数据、原理图。所有指标证据等级仅"分析级"。
+
+## ⭐ 仓库里有两套并存的"节点工程"，务必分清（2026-10-04 查明）
+
+- **`CAN_Node1/`、`CAN_Node2/`**：用户原有的 **STM32CubeMX 生成工程**（CMake + Ninja + arm-none-eabi 工具链，`CMakePresets.json` 里 preset 名 `Debug`/`Release`）。最初是**空骨架**：`.ioc` 只配了 PD0/PD1 晶振 + PA13/PA14 SWD，`main.c` 主循环为空，**没有任何外设**。
+- **`CAN_ESP32/hello_world/`**：ESP-IDF 官方 hello_world 模板，**未动**（不是本项目代码）。
+- **`SimpleGUI-Stable/`**：与 CAN 项目**无关**的第三方 GUI 库（另有自己的 .workbuddy 记忆）。**不要动它**。
+- **`firmware/`**：我们手写的跨平台层（协议库 + 节点业务/调度/BSP），**是唯一"零 HAL 可 PC 单测"的那一层**，现已被 CAN_Node1 的 CMake 引用并编入固件。
+- ⚠️ **两套的关系 = 分层，不是重复**：CubeMX 工程负责"凑齐 HAL 驱动 + 配 72MHz 时钟 + 提供 `main()`"，`firmware/` 负责"协议、业务、调度、外设行为"。**引脚与位定时的唯一权威仍是我们自己的 BSP 与 `docs/引脚分配.md`，不是 .ioc**（.ioc 被 GUI 改一次就漂移）。
+
+## CAN_Node1 接入固件的实操要点（勿重犯）
+
+- **工程原本没有我们要用的 HAL 驱动源码**：CubeMX 只把"已配外设"的驱动拷进 `Drivers/`，缺 CAN/ADC/TIM/IWDG/UART。已从 `C:\Users\Administrator\STM32Cube\Repository\STM32Cube_FW_F1_V1.8.7` 补拷 `.c`/`.h`，并在 `Core/Inc/stm32f1xx_hal_conf.h` **末尾**（而非 CubeMX 会改写的那段）启用 `HAL_{ADC,CAN,IWDG,TIM,UART}_MODULE_ENABLED`。**每个模块都要连 `_ex` 变体一起拷**：`ADC` 需 `hal_adc_ex`（校准在里面），`TIM` 的 `hal_tim.h` 会 `#include "stm32f1xx_hal_tim_ex.h"`，漏了直接编译失败。
+- **F1 的 HAL API 与 F4 不同，别凭印象写**：F1 **没有** `HAL_ADC_Enable/Disable`（校准由 `HAL_ADCEx_Calibration_Start()` 内部完成 Enable），也**没有** `HAL_TIM_SetCompare`（要用宏 `__HAL_TIM_SET_COMPARE`）。这类错误只表现为 warning + 链接失败。
+- **两个"静默失效"陷阱（都会编译通过、烧进去却不工作）**：
+  1. `SysTick_Handler` **不能**在 BSP 里定义（会与 CubeMX 的 `stm32f1xx_it.c` 重复；链接顺序不好时 `HAL_IncTick` 不再被调用，`HAL_Delay/HAL_GetTick` 全部失效）。正确做法：在 it.c 的 `USER CODE BEGIN SysTick_IRQn 1` 里调 `node1_bsp_tick_ms()`。
+  2. **`USB_LP_CAN1_RX0_IRQHandler` 必须手工在 it.c 里实现**（启动文件里是 weak 空实现、链接不报错），里面调 `HAL_CAN_IRQHandler(&hcan1)`，再由 `HAL_CAN_RxFifo0MsgPendingCallback()` 转 `node1_can_rx_isr_handler()`。三步缺一 → 一帧都收不到。`hcan1` 因此**不能是 static**。
+- **`main()` 归 CubeMX**：`firmware/.../node1_main.c` 不再定义 `main`，改为导出不返回的 `node1_firmware_run()`，由 `Core/Src/main.c` 的 `USER CODE BEGIN 2` 段调用。这样 CubeMX 重新生成也冲不掉我们的逻辑。
+- **构建命令**（ninja 不在 PATH，需先加）：
+  `$env:PATH = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;" + $env:PATH` 然后 `cmake --preset Debug; cmake --build --preset Debug`。
+- **当前基线**：`CAN_Node1` **零告警链接成功**，RAM 2544 B / 20 KB（12.4%）、FLASH 26560 B / 64 KB（40.5%）；已核实 `node1_firmware_run`/`HAL_CAN_IRQHandler`/`HAL_CAN_RxFifo0MsgPendingCallback`/`USB_LP_CAN1_RX0_IRQHandler`/`proto_rx_seq_handle` 等关键符号确实在 ELF 里。
+- **未做**：节点一**从未上板**（PWM/CAN/看门狗只有编译与逻辑单测）；`CAN_Node2` 仅补齐了 HAL 驱动与启用项，**尚无 BSP/业务代码**，因此还没接入固件。
 
 **推送阻塞（2026-10-03 未解决，处置办法记此）**：`origin` = `https://github.com/kyhx/OverCAN-KYHX.git`（远程仍为空仓库），本地提交齐全（`ea35135` 基线、`e60b9db` 节点一骨架）。**`git push` 被网络层重置**：HTTPS 读操作（`ls-remote`）可用但 push 的 POST 被拦——换可达 IP（140.82.112/113/114.3、20.27.177.113，TCP 均通）、`http.curloptResolve` 钉 IP、`http.version HTTP/1.1`、查本地代理**全部无效**。**唯一可行 = SSH**：`ssh.github.com:443` 与 `github.com:22` 均可达，`ssh -T -p 443 git@ssh.github.com` 返回 `Permission denied (publickey)`（服务器正常，仅缺密钥；`~/.ssh` 不存在）。恢复办法：① 生成 ed25519 → 公钥加 GitHub → `git remote set-url origin git@ssh.github.com:kyhx/OverCAN-KYHX.git` + `git config core.sshCommand "ssh -p 443"` → push；② 挂代理后 `git config http.proxy <代理>`；③ 换网络直接 `git push -u origin main`。
 

@@ -1,0 +1,6 @@
+# STM32CubeMX 脚本模式：加载 Node1.ioc 并重新生成代码
+# 用法：STM32CubeMX.exe -q <此文件路径>
+# 目的：让工具本体校验 .ioc 并补齐缺失的 HAL 驱动（CAN/ADC/TIM/IWDG/USART）
+load C:/Users/Administrator/Desktop/Y/CAN_Node1/Node1.ioc
+generate code
+exit

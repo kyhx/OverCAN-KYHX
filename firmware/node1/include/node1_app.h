@@ -34,6 +34,16 @@
 extern "C" {
 #endif
 
+/**
+ * 固件主体入口：初始化 BSP / 业务层 / 调度层，然后**常驻主循环，不返回**。
+ *
+ * 定义在 port/stm32f103/node1_main.c。之所以把入口放在端口层而不是业务层：
+ * 业务层必须保持"零 HAL、可 PC 单测"，而入口免不了与端口初始化打交道。
+ *
+ * ⚠️ 使用方（CubeMX 的 main.c）必须**在 MX_GPIO_Init() 之后**调用它。
+ */
+void node1_firmware_run(void);
+
 /** 遥测 status 位定义（docs/protocol.md §5.2，对应 0x210 的 b7）。 */
 #define NODE1_STATUS_STALL_BIT      0u /**< bit0 堵转 —— **待电流采样硬件**，恒 0 */
 #define NODE1_STATUS_OVERTEMP_BIT   1u /**< bit1 过温                       */
