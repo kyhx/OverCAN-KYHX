@@ -7,13 +7,15 @@
  * 能在 PC 上做单测的前提。
  *
  * 三个必须做对的工程细节（docs/项目文档.md §9.5，均为实测踩过的坑）：
- *   1. **PWM 放在通用定时器 TIM4（PB6/PB7），不放 TIM1**。原方案用 TIM1 的
- *      PA8/PA9，有两个代价：① PA9 兼作 USART1_TX，占用后节点一失去唯一调试
- *      串口；② TIM1 是高级控制定时器，输出默认关闭，**必须显式调用
- *      `HAL_TIM_CtrlPWMOutputs(TIM1, ENABLE)` 使能 MOE**，漏掉这行的现象极具
- *      迷惑性：寄存器配置全对、定时器在跑、引脚上却没有波形。
- *      改到 TIM4 后这两个问题一起消失（通用定时器无 MOE 概念）。
- *      依据：docs/引脚分配.md §3.2 方案 A。
+ *   1. **PWM 落在哪个定时器，由实物指定的引脚决定，不能反推**。
+ *      历史过程：最初用 TIM1 的 PA8/PA9（代价：PA9 兼 USART1_TX，且 TIM1 必须
+ *      使能 MOE，否则"寄存器全对、引脚无波形"）→ 为回避而改到 TIM4 的 PB6/PB7。
+ *      **现按用户 2026-10-04 的实物接线改用 PB15，而 PB15 在 LQFP48 上只有
+ *      TIM1_CH3N 一个定时器功能**，于是又回到 TIM1，那两个坑必须正面处理：
+ *      ① `HAL_TIMEx_PWMN_Start()` 内部会 `__HAL_TIM_MOE_ENABLE()`——
+ *         互补通道必须用这个函数启动（`HAL_TIM_PWM_Start` 只开主通道 CCxE）；
+ *      ② 占空比仍由主通道 CCR3 决定（CC3NE 只是把 OC3REF 引到 PB15）。
+ *      教训：**引脚决定定时器，而不是定时器决定引脚**。
  *   2. **bxCAN 的 BS1 只有 4 bit**（TS1[19:16]），最大 16 tq。
  *      网上常见的"24 tq @ 500kbps"方案在 F103 上根本编译不出来/跑不起来。
  *      本项目用 8 tq：P=9 BS1=6 BS2=1 SJW=1 → 采样点 87.5%。
@@ -21,10 +23,11 @@
  *
  * 硬件前提（务必按 node1_config.h 接线）：
  *   - 热敏 AO → PA0 (ADC1_IN0)，DO → PA1
- *   - TB6612: PWMA=PB6(TIM4_CH1) PWMB=PB7(TIM4_CH2) A组 IN1=PB0 IN2=PB1
- *             B组 IN1=PB10 IN2=PB11 STBY=PB12
- *   - 蜂鸣器 PB13（**低电平有效**）
- *   - 调试串口 USART1: TX=PA9 RX=PA10（PWM 移走后已释放）
+ *   - TB6612（**只用电机 A**）: PWMA=PB15(TIM1_CH3N) AIN1=PB14 AIN2=PB13 STBY=PB12
+ *     ⚠️ PB15 只有 TIM1_CH3N 这一个定时器功能 → 必须使能 MOE + 用 PWMN_Start
+ *   - 蜂鸣器 **PA6**（**低电平有效**）
+ *   - 调试串口 USART1: TX=PA9 RX=PA10（PA10 是 TIM1_CH3 主通道，但我们不初始化它，
+ *     且只启动互补通道，故 PA10 不受 PWM 影响）
  *   - CAN1: TX=PA12 RX=PA11，**两端必须各接 120Ω 终端电阻**
  *   - SWD: PA13/PA14 **必须保留**
  */
@@ -115,37 +118,41 @@ static void gpio_init(void)
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
 
-    /* --- PB6/PB7：TIM4_CH1/CH2 复用推挽输出（电机 PWM）-------------- */
-    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_6 | GPIO_PIN_7);
+    /* --- PB15：TIM1_CH3N 复用推挽输出（电机 PWM）---------------------
+     * ⚠️ PB15 在 LQFP48 上只有 TIM1_CH3N 这一个定时器功能（见 node1_config.h）。
+     * 只初始化 PB15；PA10（TIM1_CH3 主通道）**保持默认浮空输入**，
+     * 因此 CC3E 即使被配置也不会在 PA10 上产生波形，USART1_RX 不受影响。 */
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_15);
     g.Mode = GPIO_MODE_AF_PP;
     g.Speed = GPIO_SPEED_FREQ_HIGH;   /* 20kHz PWM 需要较高的输出翻转速度 */
-    g.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    g.Pin = GPIO_PIN_15;
     HAL_GPIO_Init(GPIOB, &g);
 
-    /* --- 方向控制脚：PB0 PB1 PB10 PB11 推挽输出 ---------------------- */
-    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_10 | GPIO_PIN_11);
+    /* --- 方向控制脚：PB14(PB13 同一组寄存器) 推挽输出 ---------------- */
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_14 | GPIO_PIN_13);
     g.Mode = GPIO_MODE_OUTPUT_PP;
-    g.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_10 | GPIO_PIN_11;
+    g.Pin = GPIO_PIN_14 | GPIO_PIN_13;
     HAL_GPIO_Init(GPIOB, &g);
 
-    /* 上电先全部拉低：电机停、IN 组合为"惰行"。放在 gpio_init 末尾统一做，
-     * 避免 GPIO 模式切换的瞬间出现浮空输入。 */
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0 | GPIO_PIN_1, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10 | GPIO_PIN_11, GPIO_PIN_RESET);
+    /* 上电先全部拉低：IN1=IN2=0 → 惰行（电机不转）。
+     * 放在 gpio_init 末尾统一做，避免 GPIO 模式切换的瞬间出现浮空输入。 */
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14 | GPIO_PIN_13, GPIO_PIN_RESET);
 
-    /* --- PB12 STBY：⚠️ 上电立即拉低（待机），见 node1_bsp_init 注释 --- */
+    /* --- PB12 STBY：⚠️ 上电立即拉低（待机），见 bsp_motor_enable 注释 --- */
     HAL_GPIO_DeInit(GPIOB, GPIO_PIN_12);
     g.Mode = GPIO_MODE_OUTPUT_PP;
     g.Pin = GPIO_PIN_12;
     HAL_GPIO_Init(GPIOB, &g);
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); /* 安全优先 */
 
-    /* --- PB13 蜂鸣器：⚠️ 低电平有效 → 初始必须写高（静音） ----------- */
-    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_13);
+    /* --- PA6 蜂鸣器：⚠️ 低电平有效 → 初始必须写高（静音） -------------
+     * 蜂鸣器已从 PB13 改到 PA6（用户 2026-10-04 指定），
+     * 所以这里操作的是 **GPIOA** —— 与 node1_config.h 末尾的断言一致。 */
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_6);
     g.Mode = GPIO_MODE_OUTPUT_PP;
-    g.Pin = GPIO_PIN_13;
-    HAL_GPIO_Init(GPIOB, &g);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET); /* 高 = 不响 */
+    g.Pin = GPIO_PIN_6;
+    HAL_GPIO_Init(GPIOA, &g);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET); /* 高 = 不响 */
 
     /* --- PA1 热敏 DO：输入下拉（悬空时读 0，避免随机误报）----------- */
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_1);
@@ -199,11 +206,18 @@ static void adc_init(void)
 }
 
 /* ========================================================================== */
-/* TIM4 → PWM（20kHz，PB6/PB7）                                                */
+/* TIM1 → PWM（20kHz，PB15 = TIM1_CH3N 互补输出）                               */
 /* ========================================================================== */
 
-/** 电机 PWM 定时器句柄。用 TIM4（通用定时器）而非 TIM1：
- *  ① 无需 MOE 使能；② 不占用 PA9/PA10 的 USART1 调试口。 */
+/** 电机 PWM 定时器句柄。
+ *
+ * ⚠️ 这里用 TIM1（高级控制定时器）而**不是** TIM4，因为实物指定的 PWMA 是
+ *    **PB15**，而 PB15 只有 `TIM1_CH3N` 这一个定时器功能（TIM4 不映射到 PB15）。
+ *    回到 TIM1 就必须处理两件当初被刻意回避的事：
+ *      ① **MOE 必须使能**，否则引脚上没有任何波形（寄存器全对也没用）；
+ *      ② **互补通道要单独启动**：`HAL_TIMEx_PWMN_Start()`，
+ *         而不是 `HAL_TIM_PWM_Start()`（后者只开主通道 CCxE）。
+ *    这两点都写在 node1_config.h 的对应注释里，改引脚时请一并阅读。 */
 static TIM_HandleTypeDef htim_motor;
 
 static void pwm_init(void)
@@ -211,44 +225,52 @@ static void pwm_init(void)
     TIM_OC_InitTypeDef oc = {0};
     GPIO_InitTypeDef g = {0};
 
-    __HAL_RCC_TIM4_CLK_ENABLE();
+    __HAL_RCC_TIM1_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
 
-    /* PB6/PB7 必须在**本函数内**再配一次为复用推挽：
+    /* PB15 必须在**本函数内**再配一次为复用推挽：
      * 虽然 gpio_init 已配过，但 gpio_init 末尾对方向脚/STBY/蜂鸣器的写操作
      * 以及后续可能的重配置都可能影响，PWM 引脚的正确性直接决定电机能否转动，
      * 这里做一次幂等的显式配置，避免"顺序改动导致没波形"。 */
     g.Mode = GPIO_MODE_AF_PP;
     g.Speed = GPIO_SPEED_FREQ_HIGH;
-    g.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    g.Pin = GPIO_PIN_15;
     HAL_GPIO_Init(GPIOB, &g);
 
-    htim_motor.Instance = TIM4;
+    htim_motor.Instance = TIM1;
     htim_motor.Init.Prescaler = NODE1_MOTOR_PWM_PSC;
     htim_motor.Init.CounterMode = TIM_COUNTERMODE_UP;
     htim_motor.Init.Period = NODE1_MOTOR_PWM_ARR;  /* 72MHz/1/3600 = 20kHz */
     htim_motor.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
     htim_motor.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    /* 高级定时器专用字段：重复计数器为 0（每周期都产生更新事件）。
+     * 不初始化它时（CubeMX 之外手写代码）HAL 会用结构体里的值，
+     * 若上次是脏值会导致更新事件频率不对。 */
+    htim_motor.Init.RepetitionCounter = 0u;
     if (HAL_TIM_PWM_Init(&htim_motor) != HAL_OK) {
-        bsp_log("tim4 pwm init failed\r\n");
+        bsp_log("tim1 pwm init failed\r\n");
     }
 
     oc.OCMode = TIM_OCMODE_PWM1;
     oc.Pulse = 0; /* ⚠️ 必须为 0：非 0 会让电机一上电就转 */
     oc.OCPolarity = TIM_OCPOLARITY_HIGH;
+    oc.OCNPolarity = TIM_OCNPOLARITY_HIGH;  /* 互补通道同相：占空比语义与主通道一致 */
     oc.OCFastMode = TIM_OCFAST_DISABLE;
-    /* 注：TIM4 是通用定时器，没有互补输出与 MOE，故不再设置
-     *     OCIdleState / OCNIdleState 等高级定时器专用字段。 */
+    /* 空闲状态（刹车/停机时引脚电平）。设 RESET = 输出低，配合 TB6612 的
+     * PWM 输入语义（低 = 不驱动）。若不设，TIM1 在 MOE 关闭瞬间会按
+     * OCIdleState 输出，可能给电机一个意外的窄脉冲。 */
+    oc.OCIdleState  = TIM_OCIDLESTATE_RESET;
+    oc.OCNIdleState = TIM_OCNIDLESTATE_RESET;
 
-    (void)HAL_TIM_PWM_ConfigChannel(&htim_motor, &oc, TIM_CHANNEL_1); /* PB6 */
-    (void)HAL_TIM_PWM_ConfigChannel(&htim_motor, &oc, TIM_CHANNEL_2); /* PB7 */
+    (void)HAL_TIM_PWM_ConfigChannel(&htim_motor, &oc, TIM_CHANNEL_3); /* PB15 = CH3N */
 
-    (void)HAL_TIM_PWM_Start(&htim_motor, TIM_CHANNEL_1);
-    (void)HAL_TIM_PWM_Start(&htim_motor, TIM_CHANNEL_2);
+    /* ⚠️① 互补通道必须用 PWMN_Start：HAL_TIM_PWM_Start 只置 CC3E（主通道），
+     *      而 PB15 上的输出由 CC3NE 控制——用错函数就是"配置全对、没有波形"。
+     * ⚠️② 该函数内部会调用 __HAL_TIM_MOE_ENABLE() 使能主输出（MOE）。
+     *      这是 TIM1 与 TIM4 最本质的区别：高级定时器默认关闭输出。 */
+    (void)HAL_TIMEx_PWMN_Start(&htim_motor, TIM_CHANNEL_3);
 
-    /* 说明：这里**刻意不需要** HAL_TIM_CtrlPWMOutputs —— MOE 是 TIM1/TIM8
-     * 等高级控制定时器才有的主输出使能位，通用定时器 TIM4 无此概念。
-     * 若将来把 PWM 换回 TIM1，必须补上这一行，否则没有波形。 */
+    bsp_log("tim1 pwm ready (PB15/CH3N, MOE on)\r\n");
 }
 
 /* ========================================================================== */
@@ -348,12 +370,39 @@ static void can_init(void)
     HAL_GPIO_Init(GPIOA, &g);
 
     hcan1.Instance = CAN1;
-    hcan1.Init.Prescaler = 9;              /* APB1=36MHz → tq = 36/(9+1) = 3.6MHz */
+
+    /* ⚠️ 位时序不只要"双方一致"，还要**把采样点对齐对端**。
+     *
+     * 位速率公式：  位速率 = tq_clock / (1 + BS1 + BS2)
+     *               tq_clock = APB1 / (Prescaler + 1) = 36MHz / (P+1)
+     * 约束：        bxCAN 总 tq 数 (1+BS1+BS2) ≤ 16 且 BS2 ≥ 1
+     *
+     * ⭐ 当前用 **500 kbps**（协议规定值）：
+     *     P=11 → tq = 36/12 = **3MHz**
+     *     1 + BS1(4) + BS2(1) = **6 tq** → 3MHz/6 = **500 kbps** ✅
+     *     采样点 = (1+4)/6 = **83.3%**
+     *
+     * ⚠️ 为什么不是 80%（对端 ESP32 的值）：**500k 下 80.0% 数学上无法命中**。
+     *   - 要 80% 需 (1+BS1)/(1+BS1+BS2)=0.8，即总 tq 是 5 的倍数：5/10/15/20…
+     *   - 而 tq_clock 必须是 36MHz/(P+1) 且要整除到位速率：500k × 总tq
+     *   - 总 tq≤16 的合法组合只有三组能命中 500k：
+     *       P=5  → 12 tq → BS1=8,BS2=3 → **75.0%**（差 5.0）
+     *       P=8  →  8 tq → BS1=6,BS2=1 → 87.5%（差 7.5）
+     *       P=11 →  6 tq → BS1=4,BS2=1 → **83.3%**（差 3.3）★ 最接近
+     *   （P=3 → 9MHz 需总 18 tq，超过 bxCAN 的 16 tq 上限，不可行）
+     *
+     * ⚠️ 2026-10-04 实机已验证：**采样点不是本项目的故障原因**。
+     *   节点一从 75.0% 改到 83.3% 后，对端 ESP32 的读数完全不变
+     *   （仍 `re=128 rx=0`），且**降到 125kbps 后错误方向翻转成 `te=128`** ——
+     *   说明问题在**物理通路**（收发器供电/共地/CAN_H-L 接反/RXD 未接），
+     *   不在时序参数。**不要再靠调时序去"修"它。**
+     *   参考：128kbps 下用 16 tq 可精确命中 80.0%（P=17, BS1=15, BS2=4）。 */
+    hcan1.Init.Prescaler = 11;               /* APB1=36MHz → tq = 36/12 = 3MHz */
     hcan1.Init.Mode = CAN_MODE_NORMAL;
-    hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
-    /* 采样点 = (1 + TS1) / (1 + TS1 + TS2) = (1+6)/8 = 87.5%
-     * ⚠️ TS1 只有 4 bit（最大 16 tq），网上"24tq@500k"方案在 F103 上做不到。 */
-    hcan1.Init.TimeSeg1 = CAN_BS1_6TQ;
+    hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;  /* 总只有 6 tq，SJW 不宜超过 1 */
+    /* 采样点 = (1 + BS1) / (1 + BS1 + BS2) = (1+4)/6 = **83.3%**
+     * ⚠️ BS1 只有 4 bit（最大 16 tq），网上"24tq@500k"方案在 F103 上做不到。 */
+    hcan1.Init.TimeSeg1 = CAN_BS1_4TQ;
     hcan1.Init.TimeSeg2 = CAN_BS2_1TQ;
     hcan1.Init.TimeTriggeredMode = DISABLE;
     hcan1.Init.AutoBusOff = ENABLE;  /* Bus-Off 后自动恢复，避免节点永久掉线 */
@@ -448,20 +497,14 @@ static void bsp_motor_set(node1_motor_id_t id, node1_motor_action_t action,
 {
     GPIO_PinState in1 = GPIO_PIN_RESET;
     GPIO_PinState in2 = GPIO_PIN_RESET;
-    uint16_t pin_in1;
-    uint16_t pin_in2;
-    GPIO_TypeDef *port_in1;
-    GPIO_TypeDef *port_in2;
-    uint32_t channel;
 
-    if (id == NODE1_MOTOR_A) {
-        port_in1 = GPIOB; pin_in1 = (uint16_t)(1u << NODE1_MOTOR_A_IN1_PIN);
-        port_in2 = GPIOB; pin_in2 = (uint16_t)(1u << NODE1_MOTOR_A_IN2_PIN);
-        channel = TIM_CHANNEL_1; /* PB6 */
-    } else {
-        port_in1 = GPIOB; pin_in1 = (uint16_t)(1u << NODE1_MOTOR_B_IN1_PIN);
-        port_in2 = GPIOB; pin_in2 = (uint16_t)(1u << NODE1_MOTOR_B_IN2_PIN);
-        channel = TIM_CHANNEL_2; /* PB7 */
+    /* 硬件只有**一路**电机（用户 2026-10-04 指定：PWMA=PB15 / AIN1=PB14 /
+     * AIN2=PB13）。对电机 B 的请求**静默忽略**并保持 A 的状态不变：
+     * 上层（node1_app.c / 掉线安全态）仍会按"两台电机"的模型同时调 A 与 B，
+     * 若这里对 B 做任何动作（例如误当作 A 处理），就会出现"命令 A 却
+     * 影响了正在转的电机"这类难以定位的行为。显式忽略是最安全的语义。 */
+    if (id != NODE1_MOTOR_A) {
+        return;
     }
 
     switch (action) {
@@ -489,31 +532,42 @@ static void bsp_motor_set(node1_motor_id_t id, node1_motor_action_t action,
     }
     const uint32_t ccr = ((uint32_t)duty_pct * (htim_motor.Init.Period + 1u)) / 100u;
     /* 用 __HAL_TIM_SET_COMPARE 宏而不是 HAL_TIM_SetCompare 函数：
-     * 后者在 F1 的 HAL 里不存在（是 F0/F3/F4 的 API），写了会链接失败。 */
-    __HAL_TIM_SET_COMPARE(&htim_motor, channel, ccr);
+     * 后者在 F1 的 HAL 里不存在（是 F0/F3/F4 的 API），写了会链接失败。
+     * 通道用 TIM_CHANNEL_3 —— 互补输出的占空比仍由主通道的 CCR3 决定
+     * （CC3NE 只是把 OC3REF 引到 PB15 上）。 */
+    __HAL_TIM_SET_COMPARE(&htim_motor, TIM_CHANNEL_3, ccr);
 
-    HAL_GPIO_WritePin(port_in1, pin_in1, in1);
-    HAL_GPIO_WritePin(port_in2, pin_in2, in2);
+    HAL_GPIO_WritePin(GPIOB, (uint16_t)(1u << NODE1_MOTOR_A_IN1_PIN), in1);
+    HAL_GPIO_WritePin(GPIOB, (uint16_t)(1u << NODE1_MOTOR_A_IN2_PIN), in2);
 }
 
 static void bsp_motor_enable(bool on)
 {
-#if NODE1_MOTOR_STBY_PORT == 'B'
+    /* ⚠️ 这里曾经是 `#if NODE1_MOTOR_STBY_PORT == 'B'`，而宏当时写成了裸
+     * 标识符 `B`（未定义 → 预处理展开为空）→ 表达式退化成 `== 'B'` →
+     * **恒假** → 本函数体被整段预处理掉 → STBY 永远保持 gpio_init() 里
+     * 拉低的状态 → TB6612 停在待机、输出高阻 → **电机永远不转**。
+     * 而且：编译零告警（代码根本没进编译）、运行零报错（引脚就是低电平）。
+     *
+     * 现在不再用 #if 包住函数体：STBY 就在 GPIOB 上，包一层条件编译
+     * 没有收益，只多出一类"代码被悄悄删掉"的失败模式。
+     * 端口归属改由 node1_config.h 末尾的编译期断言保证。 */
     HAL_GPIO_WritePin(GPIOB, (uint16_t)(1u << NODE1_MOTOR_STBY_PIN),
                       on ? GPIO_PIN_SET : GPIO_PIN_RESET);
-#endif
 }
 
 static void bsp_buzzer_set(bool on)
 {
-    /* ⚠️ 低电平有效：意图"响" → 输出低。写反了就是上电狂叫。 */
+    /* ⚠️ 低电平有效：意图"响" → 输出低。写反了就是上电狂叫。
+     * ⚠️ 蜂鸣器在 **PA6（GPIOA）**，不是 GPIOB —— 引脚从 PB13 改到 PA6 后
+     *    这里必须一起改；只改宏不改这里就是"编译通过、蜂鸣器永远不响"。 */
     const GPIO_PinState level =
 #if NODE1_BUZZER_ACTIVE_LOW
         (on ? GPIO_PIN_RESET : GPIO_PIN_SET);
 #else
         (on ? GPIO_PIN_SET : GPIO_PIN_RESET);
 #endif
-    HAL_GPIO_WritePin(GPIOB, (uint16_t)(1u << NODE1_BUZZER_PIN), level);
+    HAL_GPIO_WritePin(GPIOA, (uint16_t)(1u << NODE1_BUZZER_PIN), level);
 }
 
 static bool bsp_can_send(const proto_can_frame_t *f)
@@ -658,11 +712,8 @@ void node1_bsp_feed_watchdog(void)
 
 void node1_bsp_soft_reset(void)
 {
-    /* 复位前把执行器置于安全态：电机停 + STBY 拉低。
-     * 否则复位瞬间电机仍在转，或驱动芯片在高阻/低阻间跳变。
-     * 这一步在有执行器的系统里不是可选项。 */
+    /* 复位前把执行器置于安全态：电机停 + STBY 拉低。 */
     bsp_motor_set(NODE1_MOTOR_A, NODE1_MOTOR_ACTION_STOP, 0u);
-    bsp_motor_set(NODE1_MOTOR_B, NODE1_MOTOR_ACTION_STOP, 0u);
     bsp_motor_enable(false);
     bsp_buzzer_set(false);
 

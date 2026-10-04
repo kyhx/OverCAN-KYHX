@@ -16,9 +16,26 @@ can/*.gen.tmp.dbc
 docs/*.pdf
 docs/*.txt
 
+# 第三方 GUI 库（SimpleGUI-Stable）：**上游参考副本，不入库**
+#   真正移植进本项目的成果在 CAN_ESP32/hello_world/components/simplegui/，那是要入库的。
+#   原因：上游是 18MB 的他人仓库，含 PDF/docx/截图/预编译 libiconv.a 等二进制，
+#   混进本仓库既淹没自己的改动，也让作品集显得杂乱。上游为 MIT 许可，需要时按
+#   https://github.com/pkxgy/SimpleGUI 自行获取即可。
+SimpleGUI-Stable/
+
+# 联调诊断日志：ESP32 侧 CAN 排错过程（500k/125k、自测/回环/只听多轮实验）的原始输出。
+#   结论已固化在 can_twai.h 的注释与 docs/技术方案与实施.md 里，日志本身属临时产物。
+*.log
+
+# Agent 会话记忆（.workbuddy/）：本机 AI 助手的项目记忆与工作日志，
+#   属开发过程产物，与作品集要展示的工程内容无关，故不入库。
+.workbuddy/
+
 # 编辑器 / 系统
 .vs/
 .vscode/
+.idea/
+*.iml
 *.user
 Thumbs.db
 desktop.ini

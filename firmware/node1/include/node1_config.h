@@ -35,7 +35,7 @@
 
 /* --- CAN1（bxCAN）-------------------------------------------------------- */
 /* ⚠️ PA11 与 USB D- 共用：占用后板上 USB 不可用，调试只能走 SWD。 */
-#define NODE1_CAN_PORT          A
+#define NODE1_CAN_PORT          'A'
 #define NODE1_CAN_TX_PIN        12   /**< PA12 = CAN1_TX */
 #define NODE1_CAN_RX_PIN        11   /**< PA11 = CAN1_RX */
 #define NODE1_CAN_BITRATE_BPS   500000u
@@ -45,49 +45,60 @@
  * ⚠️ STM32F103 的 ADC 引脚**完全不支持 5V**，模拟输入不得超过 VDDA。
  * 3.3V 供电时模块输出 ≤3.3V 可直连；5V 供电**必须**外部分压。 */
 #define NODE1_THERM_ADC_CHANNEL   0u   /**< ADC1_IN0 = PA0 */
-#define NODE1_THERM_DO_PORT       A
+#define NODE1_THERM_DO_PORT       'A'
 #define NODE1_THERM_DO_PIN        1u   /**< PA1，热敏模块数字量输出 */
 
-/* --- TB6612FNG 电机驱动（双通道）------------------------------------------ */
-/* PWMA = PB6 = TIM4_CH1；PWMB = PB7 = TIM4_CH2。
+/* --- TB6612FNG 电机驱动（**只用电机 A**，2 位用户实物接线）-------------------
+ * PWMA = PB15 = TIM1_CH3N；AIN1 = PB14；AIN2 = PB13；STBY = PB12。
  *
- * ⚠️ 为什么不用文档里的 PA8/PA9（TIM1_CH1/CH2）——这两条都是实际踩过的坑：
- *   ① PA9 = USART1_TX：占用后节点一**失去唯一的调试串口**，阶段 1"单节点打通"
- *      的调试成本陡增；
- *   ② TIM1 是**高级控制定时器**，输出默认关闭，必须额外调用
- *      `TIM_CtrlPWMOutputs(TIM1, ENABLE)` 使能 MOE，漏掉就是"配置全对但没有
- *      波形"的经典哑火。
- *   改到 TIM4 后：PA9/PA10 留作 USART1 调试口，且通用定时器无 MOE 概念。
- *   代价：PWM 通道从 TIM1 换到 TIM4，仅改本文件的几个宏。
+ * ⚠️ 这一版与本文件历史上所有版本都不同，原因是**实物只有一路电机**，
+ *    且用户指定的 PWMA 落在 **PB15**。而 PB15 在 LQFP48 上**只有
+ *    `TIM1_CH3N`（互补输出通道）这一个定时器功能**——TIM4 根本不映射到 PB15
+ *    （TIM4_CH1/CH2 固定在 PB6/PB7）。
+ *    因此这里必须回到 **TIM1**，也就意味着必须面对当初刻意回避的那个坑：
  *
- * 依据：docs/引脚分配.md §3.2 方案 A、docs/项目文档.md §4.2 的"建议"行。 */
-#define NODE1_MOTOR_PWM_TIM          4u  /**< TIM4（通用定时器，无 MOE 坑） */
-#define NODE1_MOTOR_A_PWM_CH         1u  /**< TIM4_CH1 = PB6 */
-#define NODE1_MOTOR_B_PWM_CH         2u  /**< TIM4_CH2 = PB7 */
-/** PWM 频率 20 kHz：高于人耳听觉上限，电机啸叫不可闻。
- *  72MHz / (PSC+1) / (ARR+1) = 20kHz → PSC=0, ARR=3599。 */
+ *      ① **TIM1 是高级控制定时器，输出默认关闭，必须使能 MOE**
+ *         （`__HAL_TIM_MOE_ENABLE` / `HAL_TIMEx_PWMN_Start` 会一并使能）。
+ *         漏掉它的现象极具迷惑性：寄存器配置全对、定时器在计数、**引脚上却没有波形**。
+ *      ② **互补通道要单独启动**：配置用 `HAL_TIM_PWM_ConfigChannel(..., TIM_CHANNEL_3)`，
+ *         但启动必须用 `HAL_TIMEx_PWMN_Start(..., TIM_CHANNEL_3)`
+ *         （`HAL_TIM_PWM_Start` 只开主通道 CC3E，不开互补通道 CC3NE）。
+ *      ③ PA10 的对应主通道 CC3 不会被驱动，因为**我们只初始化 PB15 的复用功能**，
+ *         PA10 保持默认（浮空输入）。故 PA10 仍可留作 USART1_RX 调试口。
+ *
+ *    若将来想省掉这两条注意事项，把 PWMA 改到 **PA10（TIM1_CH3，非互补）** 或
+ *    PB6/PB7（TIM4_CH1/CH2，通用定时器无 MOE 概念）即可。
+ *
+ * 依据：用户 2026-10-04 指定的实物接线；引脚复用见 DS5319 Table 5。 */
+#define NODE1_MOTOR_PWM_TIM          1u  /**< TIM1（高级定时器：**必须使能 MOE**） */
+#define NODE1_MOTOR_A_PWM_CH         3u  /**< TIM1_CH3N = PB15（互补输出） */
 #define NODE1_MOTOR_PWM_FREQ_HZ      20000u
 #define NODE1_MOTOR_PWM_TIM_CLOCK_HZ 72000000u
 
-/* 方向控制脚（与上面的 PWMA/PWMB 配对：A 组一组，B 组一组） */
-#define NODE1_MOTOR_A_IN1_PORT    B
-#define NODE1_MOTOR_A_IN1_PIN     0u  /**< PB0 */
-#define NODE1_MOTOR_A_IN2_PORT    B
-#define NODE1_MOTOR_A_IN2_PIN     1u  /**< PB1 */
-#define NODE1_MOTOR_B_IN1_PORT    B
-#define NODE1_MOTOR_B_IN1_PIN     10u /**< PB10 */
-#define NODE1_MOTOR_B_IN2_PORT    B
-#define NODE1_MOTOR_B_IN2_PIN     11u /**< PB11 */
+/* 方向控制脚（与 PWMA 配对） */
+#define NODE1_MOTOR_A_IN1_PORT    'B'
+#define NODE1_MOTOR_A_IN1_PIN     14u /**< PB14 */
+#define NODE1_MOTOR_A_IN2_PORT    'B'
+#define NODE1_MOTOR_A_IN2_PIN     13u /**< PB13 */
 
 /** STBY：高电平使能驱动芯片，低电平进入待机（输出高阻）。
- *  掉线安全态必须拉低——见 NODE1_FAILSAFE_STBY。 */
-#define NODE1_MOTOR_STBY_PORT    B
+ *  掉线安全态必须拉低——见 NODE1_SAFE_MOTOR_MODE。
+ *
+ *  ⚠️ 这个宏必须是**字符字面量** `'B'`，不能写成裸标识符 `B`。
+ *  历史故障（2026-10-04）：曾写成 `#define NODE1_MOTOR_STBY_PORT B`，
+ *  而使用处是 `#if NODE1_MOTOR_STBY_PORT == 'B'`。裸标识符 B 未定义 →
+ *  预处理展开为空 → 表达式变成 `== 'B'` → **整体恒假** →
+ *  `bsp_motor_enable()` 的函数体被整段预处理掉 → TB6612 永远停在待机
+ *  （输出高阻）→ **电机永远不转**，而且编译零告警、运行零报错。
+ *  文件末尾的编译期断言会把这类错误挡在编译期。 */
+#define NODE1_MOTOR_STBY_PORT    'B'
 #define NODE1_MOTOR_STBY_PIN     12u /**< PB12 */
 
 /* --- 蜂鸣器（仅节点一）---------------------------------------------------- */
-/* ⚠️ 低电平有效：绝大多数模块都是 GND 与 IO 短接即鸣。 */
-#define NODE1_BUZZER_PORT        B
-#define NODE1_BUZZER_PIN         13u /**< PB13 */
+/* ⚠️ 低电平有效：绝大多数模块都是 GND 与 IO 短接即鸣。
+ *  PA6 原本规划给"第二个 NTC / 扩展传感器"，现改为蜂鸣器（用户 2026-10-04 指定）。 */
+#define NODE1_BUZZER_PORT        'A'
+#define NODE1_BUZZER_PIN         6u  /**< PA6 */
 #define NODE1_BUZZER_ACTIVE_LOW  1
 
 /* --- SWD：必须保留，是烧写与调试的唯一通道 -------------------------------- */
@@ -180,5 +191,52 @@ typedef enum {
      NODE1_STACK_BUZZER_WORDS + NODE1_STACK_HEARTBEAT_WORDS) > 4096u
 #error "node1 task stacks exceed 16KB budget (20KB SRAM is the hard limit)"
 #endif
+
+/* --------------------------------------------------------------------------
+ * 端口宏自检
+ *
+ * 背景：本文件用 NODE1_xxx_PORT 描述引脚所在端口，而端口层（node1_bsp.c）
+ * 最终写的是具体的 GPIOA/GPIOB。两边一旦不一致（改宏没改代码，或宏被写成
+ * 裸标识符导致 #if 恒假、整段代码被预处理掉），编译器**不会报错**，
+ * 表现为功能静默失效 —— 2026-10-04 的"电机永远不转"就是这么来的
+ * （`#define NODE1_MOTOR_STBY_PORT B` + `#if ... == 'B'` → 恒假 →
+ *   bsp_motor_enable() 被整段预处理掉 → TB6612 永远待机）。
+ *
+ * 这里把每一条"宏 ↔ 实际 GPIO"的对应关系固定下来：
+ *   NODE1_CAN_PORT       'A' : node1_bsp.c 里 can_init()         用 GPIOA
+ *   NODE1_THERM_DO_PORT  'A' : bsp_sensor_read() 读 GPIOA
+ *   NODE1_MOTOR_xx_PORT  'B' : bsp_motor_set() / _enable() 写 GPIOB
+ *   NODE1_BUZZER_PORT    'A' : bsp_buzzer_set() 写 GPIOA（PA6）
+ * 改了宏就必须同步改端口层，否则编译失败——这正是我们想要的。
+ *
+ * ⚠️ 判断依据是**实际被写到的 GPIO**，不是"引脚号属于哪个端口"的直觉。
+ *    蜂鸣器从 PB13 改到 PA6 后，这里的断言也必须从 'B' 改成 'A'：
+ *    断言不跟着改，端口层就还在写 GPIOB，而 PA6 永远不动——
+ *    又是一种"编译通过、功能死了"的失败。断言的意义正在于此。
+ *
+ * ⚠️ 用 `PROTO_STATIC_ASSERT`（proto_id.h 提供，已处理 C++11/C11/C99 三分支），
+ *    不要自己写 `_Static_assert`：本项目 CMAKE_C_STANDARD=99 且开 -Wpedantic，
+ *    用 C11 关键字会同时打挂 MSVC 构建与 C99 可移植性检查（实际踩过）。
+ * -------------------------------------------------------------------------- */
+#if defined(PROTO_STATIC_ASSERT)
+#define NODE1_STATIC_ASSERT(cond, msg) PROTO_STATIC_ASSERT(cond, msg)
+#else
+#define NODE1_SA_CAT_(a, b) a##b
+#define NODE1_SA_CAT(a, b)  NODE1_SA_CAT_(a, b)
+#define NODE1_STATIC_ASSERT(cond, msg) \
+    typedef char NODE1_SA_CAT(node1_static_assert_, __LINE__)[(cond) ? 1 : -1]
+#endif
+
+NODE1_STATIC_ASSERT(NODE1_CAN_PORT      == 'A', "node1_bsp.c can_init() 用的是 GPIOA");
+NODE1_STATIC_ASSERT(NODE1_THERM_DO_PORT == 'A', "node1_bsp.c 读热敏 DO 用的是 GPIOA");
+NODE1_STATIC_ASSERT(NODE1_MOTOR_A_IN1_PORT == 'B', "bsp_motor_set() 写的是 GPIOB");
+NODE1_STATIC_ASSERT(NODE1_MOTOR_A_IN2_PORT == 'B', "bsp_motor_set() 写的是 GPIOB");
+NODE1_STATIC_ASSERT(NODE1_MOTOR_STBY_PORT  == 'B', "bsp_motor_enable() 写的是 GPIOB");
+NODE1_STATIC_ASSERT(NODE1_BUZZER_PORT      == 'A', "bsp_buzzer_set() 写的是 GPIOA（PA6）");
+
+/* 只有一路电机：PWM 通道必须是 TIM1_CH3N 对应的那个通道号。
+ * 若把 PWMA 改到别的引脚，这里会立刻失败，提醒同步改 bsp 的通道参数。 */
+NODE1_STATIC_ASSERT(NODE1_MOTOR_PWM_TIM == 1u, "PB15 只能是 TIM1_CH3N");
+NODE1_STATIC_ASSERT(NODE1_MOTOR_A_PWM_CH == 3u, "PB15 = TIM1_CH3N，通道号必须是 3");
 
 #endif /* NODE1_CONFIG_H */

@@ -1,0 +1,79 @@
+menu "SimpleGUI display (SSD1306 SSD1306 128x64)"
+
+    choice SSD1306_ORIENTATION
+        prompt "Panel orientation"
+        default SSD1306_ORIENT_FLIP_XY
+        help
+            Some 128x64 OLED modules are wired so that the image is mirrored
+            relative to the controller's default scan direction. Pick the
+            orientation that makes the picture upright.
+
+            Default here is "Flipped both axes" because the module used in
+            this project renders 180-degree rotated with the controller
+            default (it was upside-down with only the vertical flip, and the
+            glyphs were mirrored left-right, which means BOTH axes need
+            remapping).
+            NOTE: an *existing* sdkconfig keeps its old value - changing this
+            default does not rewrite sdkconfig. Use menuconfig to switch.
+
+            Underlying registers:
+              - Horizontal mirror is set by SEG remap  (command 0xA0 / 0xA1)
+              - Vertical mirror is set by COM remap   (command 0xC0 / 0xC8)
+
+        config SSD1306_ORIENT_NORMAL
+            bool "Normal (0xA0 / 0xC0)"
+
+        config SSD1306_ORIENT_FLIP_Y
+            bool "Vertically flipped (0xA0 / 0xC8)"
+
+        config SSD1306_ORIENT_FLIP_X
+            bool "Horizontally flipped (0xA1 / 0xC0)"
+
+        config SSD1306_ORIENT_FLIP_XY
+            bool "Flipped both axes / rotate 180 (0xA1 / 0xC8)"
+    endchoice
+
+    config SSD1306_I2C_SDA_GPIO
+        int "I2C SDA GPIO"
+        default 1
+        help
+            Core board SSD1306 + MPU6050 share this I2C bus.
+            Matches docs/引脚分配.md section 2.1.
+
+    config SSD1306_I2C_SCL_GPIO
+        int "I2C SCL GPIO"
+        default 2
+
+    config SSD1306_I2C_SPEED_HZ
+        int "I2C SCL frequency (Hz)"
+        default 400000
+        help
+            400 kHz is the SSD1306/MPU6050 rated maximum. Drop to 100000 if
+            your wiring is long or unshielded.
+
+endmenu
+
+# ---------------------------------------------------------------------------
+# CAN / TWAI
+# ---------------------------------------------------------------------------
+menu "OverCAN bus (TWAI)"
+
+    # ⚠️ 这是一个 **ESP-IDF 自带的配置项**，本工程故意把它固定为 y。
+    #
+    # 背景：IDF v6.1 的 TWAI 有三层头文件，其中
+    #     esp_twai.h -> esp_twai_types.h -> hal/twai_types.h
+    #                                        -> hal/twai_types_deprecated.h
+    # 最后一层与旧驱动头 driver/twai.h 里都带
+    #     #warning "The legacy TWAI driver is deprecated..."
+    # 而本工程构建带 -Werror，**#warning 会被当成错误直接中断构建**。
+    # （实测：即使只用新 API esp_twai.h，也会通过上面这条链被引到。）
+    #
+    # 我们确实只能用这些类型（twai_frame_t / twai_node_handle_t 当前就定义在
+    # 这层头里），所以这不是"忽略自己代码的问题"，而是"接受 IDF 的类型布局"。
+    # 选择在 Kconfig 里显式固定，而不是让它在 sdkconfig 里裸着：
+    # 这样任何一次重新生成都不会把它丢掉。
+    config TWAI_SUPPRESS_DEPRECATE_WARN
+        bool
+        default y
+
+endmenu
