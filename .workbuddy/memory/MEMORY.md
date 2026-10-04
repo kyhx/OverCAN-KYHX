@@ -32,6 +32,48 @@ CAN 总线异构多控制器系统：ESP32-S3 核心机 + 2×STM32F103C8T6 节�
 
 **推送阻塞（2026-10-03 未解决，处置办法记此）**：`origin` = `https://github.com/kyhx/OverCAN-KYHX.git`（远程仍为空仓库），本地提交齐全（`ea35135` 基线、`e60b9db` 节点一骨架）。**`git push` 被网络层重置**：HTTPS 读操作（`ls-remote`）可用但 push 的 POST 被拦——换可达 IP（140.82.112/113/114.3、20.27.177.113，TCP 均通）、`http.curloptResolve` 钉 IP、`http.version HTTP/1.1`、查本地代理**全部无效**。**唯一可行 = SSH**：`ssh.github.com:443` 与 `github.com:22` 均可达，`ssh -T -p 443 git@ssh.github.com` 返回 `Permission denied (publickey)`（服务器正常，仅缺密钥；`~/.ssh` 不存在）。恢复办法：① 生成 ed25519 → 公钥加 GitHub → `git remote set-url origin git@ssh.github.com:kyhx/OverCAN-KYHX.git` + `git config core.sshCommand "ssh -p 443"` → push；② 挂代理后 `git config http.proxy <代理>`；③ 换网络直接 `git push -u origin main`。
 
+## ⭐ CubeMX 重新生成会吃掉我们的外设（2026-10-04 实际踩到，务必牢记）
+
+**现象**：用户在 CubeMX 里点"重新生成代码"后，`CAN_Node1` 构建崩掉，报满屏
+`unknown type name 'CAN_HandleTypeDef' / 'TIM_HandleTypeDef' / 'IWDG_HandleTypeDef'`。
+
+**根因链**（三处被 CubeMX 按 `.ioc` 重写，且它不认识我们的外设）：
+1. `.ioc` 里没有 CAN1/TIM4/IWDG（我们的外设初始化写在端口层 `node1_bsp.c`，不走 `MX_xxx_Init()`，
+   所以 CubeMX 侧永远看不到它们）→ 重新生成后这三项的配置被删，`PB6/PB7` 引脚也从引脚表消失。
+2. `Core/Inc/stm32f1xx_hal_conf.h` 整份重写 → `HAL_CAN/TIM/IWDG_MODULE_ENABLED` 被重新注释掉。
+3. `cmake/stm32cubemx/CMakeLists.txt` 整份重写 → CAN/TIM/IWDG 的驱动源文件从构建里消失；
+   `Drivers/` 里对应的 `.c/.h` 也被 CubeMX 删除。
+
+**结论：补丁绝不要放进这三个文件。** 正确的落脚点是 CubeMX 明确保证不改的地方：
+- **`<项目>/CMakeLists.txt`（顶层，CubeMX 注明"只生成一次，用户可自由修改"）**
+  → 在这里 ① 用 `target_sources` 补 HAL 驱动源文件；② 用
+  `target_compile_definitions` 定义 `HAL_CAN/TIM/IWDG_MODULE_ENABLED`。
+- **`Drivers/STM32F1xx_HAL_Driver/{Src,Inc}`** → 驱动源码仍需从官方包手工拷回
+  （CubeMX 重新生成会删），所以顶层 CMakeLists 里加了 `foreach + EXISTS`，**缺文件直接 FATAL_ERROR**
+  并打印补拷来源，避免退化成一堆 `undefined reference`。
+
+**⭐ 为什么启用项必须定义在命令行（这是最隐蔽的一环）**：HAL 驱动源码
+（`stm32f1xx_hal_can.c` 等）**整个文件体**被 `#ifdef HAL_CAN_MODULE_ENABLED` 包着，
+而这些 `.c` **不会**包含我们自己的头文件。若只把启用项写在某个头里，
+这些 `.c` 会被编成**空目标文件**（里面只有调试信息、没有任何代码），
+而链接命令里**明明有这些 obj** → 报 `undefined reference to HAL_CAN_Init` 时极难定位。
+只有"定义在编译命令行上"才能同时覆盖 HAL 驱动源码与我们自己的源文件。
+
+**Node2 的额外坑**：节点二的 `.ioc` 没启用 DMA，而 `stm32f1xx_hal_adc.h` / `hal_tim.h`
+引用 `DMA_HandleTypeDef`（由 `hal_dma.h` 提供）→ 只开 TIM/ADC 会报
+`unknown type name 'DMA_HandleTypeDef'`。节点一恰好启用了 DMA 所以没事。
+
+**另一个自作自受的教训**：用 PowerShell `-replace` 改 `hal_conf.h` 时，
+正则把**注释里**的 `#define HAL_RCC_MODULE_ENABLED` 也匹配了，把启用块插到了文件中间、
+并吃掉了标准启用块（RCC/GPIO/CORTEX/PWR/FLASH/EXTI 全失效）。**修这种文件要用 edit 工具精确替换，
+或干脆从可用副本复制**（本次最终用 Node1 的 `hal_conf.h` 覆盖修复了 Node2——两者 MCU/时钟相同）。
+
+**当前状态**：`CAN_Node1` 零告警（RAM 2664 B / FLASH 27596 B，42.1% PDF）。
+`CAN_Node2` 零告警（还是空骨架：RAM 1584 B / FLASH 3644 B，未接入固件）。
+两者都在顶层 CMakeLists 里带上了上述补丁与文件存在性检查。
+
+
+
 ## 工程机制（勿破坏）
 
 - **分层（节点固件已落地，节点二/ESP32 照抄）**：`node1_main.c → node1_sched.c`（RTOS 无关）`→ node1_app.c`（**零 HAL**）`→ proto_* → node1_hal_t` **vtable** → `port/stm32f103/node1_bsp.c` 或 PC mock。用**函数指针 vtable** 而非 extern 做依赖注入，mock 只需换指针即可断言硬件动作。调度逻辑独立成纯逻辑 → 时序可 PC 单测，FreeRTOS 化只换调用点。

@@ -34,7 +34,7 @@
   */
 
 #define HAL_MODULE_ENABLED
-  /*#define HAL_ADC_MODULE_ENABLED   */
+  #define HAL_ADC_MODULE_ENABLED
 /*#define HAL_CRYP_MODULE_ENABLED   */
 /*#define HAL_CAN_MODULE_ENABLED   */
 /*#define HAL_CAN_LEGACY_MODULE_ENABLED   */
@@ -58,16 +58,24 @@
 /*#define HAL_PWR_MODULE_ENABLED   */
 /*#define HAL_RCC_MODULE_ENABLED   */
 /*#define HAL_RTC_MODULE_ENABLED   */
-
-/* ---------------------------------------------------------------------------
- * 本项目启用的模块（手工维护）—— 说明同 CAN_Node1/Core/Inc/stm32f1xx_hal_conf.h
- * 前置条件：对应 HAL 驱动源码已从 STM32Cube_FW_F1_V1.8.7 拷入 Drivers/。
- * ------------------------------------------------------------------------- */
-#define HAL_ADC_MODULE_ENABLED
-#define HAL_CAN_MODULE_ENABLED
-#define HAL_IWDG_MODULE_ENABLED
-#define HAL_TIM_MODULE_ENABLED
+/*#define HAL_SD_MODULE_ENABLED   */
+/*#define HAL_MMC_MODULE_ENABLED   */
+/*#define HAL_SDRAM_MODULE_ENABLED   */
+/*#define HAL_SMARTCARD_MODULE_ENABLED   */
+/*#define HAL_SPI_MODULE_ENABLED   */
+/*#define HAL_SRAM_MODULE_ENABLED   */
+/*#define HAL_TIM_MODULE_ENABLED   */
 #define HAL_UART_MODULE_ENABLED
+/*#define HAL_USART_MODULE_ENABLED   */
+/*#define HAL_WWDG_MODULE_ENABLED   */
+
+#define HAL_CORTEX_MODULE_ENABLED
+#define HAL_DMA_MODULE_ENABLED
+#define HAL_FLASH_MODULE_ENABLED
+#define HAL_EXTI_MODULE_ENABLED
+#define HAL_GPIO_MODULE_ENABLED
+#define HAL_PWR_MODULE_ENABLED
+#define HAL_RCC_MODULE_ENABLED
 
 /* ########################## Oscillator Values adaptation ####################*/
 /**

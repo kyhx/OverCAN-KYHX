@@ -34,7 +34,7 @@
   */
 
 #define HAL_MODULE_ENABLED
-  /*#define HAL_ADC_MODULE_ENABLED   */
+  #define HAL_ADC_MODULE_ENABLED
 /*#define HAL_CRYP_MODULE_ENABLED   */
 /*#define HAL_CAN_MODULE_ENABLED   */
 /*#define HAL_CAN_LEGACY_MODULE_ENABLED   */
@@ -65,7 +65,7 @@
 /*#define HAL_SPI_MODULE_ENABLED   */
 /*#define HAL_SRAM_MODULE_ENABLED   */
 /*#define HAL_TIM_MODULE_ENABLED   */
-/*#define HAL_UART_MODULE_ENABLED   */
+#define HAL_UART_MODULE_ENABLED
 /*#define HAL_USART_MODULE_ENABLED   */
 /*#define HAL_WWDG_MODULE_ENABLED   */
 
@@ -76,25 +76,6 @@
 #define HAL_GPIO_MODULE_ENABLED
 #define HAL_PWR_MODULE_ENABLED
 #define HAL_RCC_MODULE_ENABLED
-
-/* ---------------------------------------------------------------------------
- * 本项目启用的模块（手工维护）
- *
- * ⚠️ 为什么写在下面而不是取消上面注释：
- *   上面那份带注释的清单是 STM32CubeMX 重新生成时会改写的位置。放在这一块
- *   可以让"以后用 CubeMX 重新生成"时我们的启用项仍然生效（CubeMX 只改它自己
- *   那段），代价是启用了 CubeMX 不认识的模块——而本项目确实不再走 CubeMX 生成
- *   外设初始化（引脚配置写在 node1_bsp.c / node2_bsp.c 里，见 docs/引脚分配.md）。
- *
- * 前置条件：对应的 HAL 驱动源码必须存在于 Drivers/STM32F1xx_HAL_Driver/Src。
- *   这些文件已从 STM32Cube_FW_F1_V1.8.7 官方包拷入本工程（原工程只拷贝了已启用
- *   外设的源码，缺 CAN/ADC/TIM/IWDG/UART，导致"想用却没文件可编"）。
- * ------------------------------------------------------------------------- */
-#define HAL_ADC_MODULE_ENABLED
-#define HAL_CAN_MODULE_ENABLED
-#define HAL_IWDG_MODULE_ENABLED
-#define HAL_TIM_MODULE_ENABLED
-#define HAL_UART_MODULE_ENABLED
 
 /* ########################## Oscillator Values adaptation ####################*/
 /**
